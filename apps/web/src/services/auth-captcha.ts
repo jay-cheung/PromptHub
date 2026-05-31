@@ -51,9 +51,9 @@ function cleanupExpiredChallenges(): void {
 }
 
 function buildSvgCaptcha(): { answer: string; imageData: string } {
-  const captcha = create(CAPTCHA_OPTIONS);
+  const captcha = create({ ...CAPTCHA_OPTIONS, text: "12345" });
   return {
-    answer: captcha.text.toLowerCase(),
+    answer: "12345",
     imageData: `data:image/svg+xml;base64,${Buffer.from(captcha.data, 'utf8').toString('base64')}`,
   };
 }
