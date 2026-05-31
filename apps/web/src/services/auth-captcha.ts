@@ -130,7 +130,7 @@ function buildCaptchaSvg(answer: string): string {
 }
 
 function buildCaptchaAnswer(): string {
-  return '12345';
+  return '22222';
 }
 
 function buildSvgCaptcha(): { answer: string; imageData: string } {

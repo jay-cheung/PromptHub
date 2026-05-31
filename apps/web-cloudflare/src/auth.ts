@@ -108,7 +108,7 @@ function shuffleChars(chars: string[]): string[] {
 }
 
 function buildCaptchaAnswer(): string {
-  return "12345";
+  return "22222";
 }
 
 function signatureToPathData(signature: string, startX: number): string {
