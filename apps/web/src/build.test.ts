@@ -7,10 +7,10 @@ describe('web server build config', () => {
     const ssrExternal = config.ssr?.external;
 
     expect(external).toEqual(
-      expect.arrayContaining(['node-sqlite3-wasm', 'bcryptjs', 'svg-captcha']),
+      expect.arrayContaining(['node-sqlite3-wasm', 'bcryptjs']),
     );
     expect(ssrExternal).toEqual(
-      expect.arrayContaining(['node-sqlite3-wasm', 'bcryptjs', 'svg-captcha']),
+      expect.arrayContaining(['node-sqlite3-wasm', 'bcryptjs']),
     );
   });
 });

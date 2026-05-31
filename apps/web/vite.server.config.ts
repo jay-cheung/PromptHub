@@ -21,11 +21,11 @@ export default defineConfig({
       output: {
         entryFileNames: 'index.js',
       },
-      external: [/^node:/, 'node-sqlite3-wasm', 'bcryptjs', 'svg-captcha'],
+      external: [/^node:/, 'node-sqlite3-wasm', 'bcryptjs'],
     },
   },
   ssr: {
     noExternal: true,
-    external: ['node-sqlite3-wasm', 'bcryptjs', 'svg-captcha'],
+    external: ['node-sqlite3-wasm', 'bcryptjs'],
   },
 });
