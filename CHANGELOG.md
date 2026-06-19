@@ -1,5 +1,124 @@
 ## [Unreleased]
 
+## [0.5.9-beta.1] - 2026-06-14
+
+### 新功能 / Features
+
+- 🧰 **MCP 管理工作台预览版**：新增桌面端 MCP 入口，支持本地 MCP 库、官方模板商店、Agent 目标分发、静态健康检查、`.env` 按需导入、冲突保护和 CLI MCP 命令
+  - **MCP Management Workspace Preview**: Added a desktop MCP workspace with a local MCP library, official template store, agent-target distribution, static health checks, selective `.env` import, target conflict protection, and CLI MCP commands
+- 🌳 **Prompt 关系树与语义关系**：现有 Prompt 列表和表格支持拖拽成父子结构、展开/折叠、父级标签、子项计数，并在详情页提供关系导航与语义关系面板
+  - **Prompt Relationship Tree and Semantic Relations**: Existing prompt lists and tables now support drag-to-group parent/child trees, expand/collapse, parent labels, child counts, plus detail-page relationship navigation and semantic relation panels
+- 🤖 **Agent 助手需求边界**：记录了后续 Agent Assistant 的产品与技术边界，明确其应通过受限动作调用现有 Skill / Rules / MCP / Prompt 能力，而不是模拟 UI 点击
+  - **Agent Assistant Boundary Defined**: Documented the next Agent Assistant boundary: it should execute constrained actions through existing Skill / Rules / MCP / Prompt capabilities instead of simulating UI clicks
+
+### 问题修复 / Fixes
+
+- 🔐 **SSH GitHub Skill 扫描不再走匿名 API**：`git@github.com:owner/repo.git` 扫描阶段改为本地 `git clone --depth 1` 后解析 `SKILL.md`，避免 SSH 仓库仍触发 GitHub 匿名 API 限流
+  - **SSH GitHub Skill Scans No Longer Use Anonymous API**: `git@github.com:owner/repo.git` scans now clone locally with `git clone --depth 1` and parse `SKILL.md`, avoiding anonymous GitHub API rate limits for SSH repositories
+- 🔎 **Git 仓库导入交互修复**：仓库地址修改后会清空旧结果并提示重新扫描；再次进入导入模式会回到干净状态；HTTPS 限流错误会提示稍后重试或改用 SSH
+  - **Git Repository Import UX Fixed**: Changing the repository URL clears stale results and asks for a rescan; reopening import starts cleanly; HTTPS rate-limit errors now suggest retrying later or switching to SSH
+- 🔢 **Skill 版本展示从 v1 开始**：Skill 详情页不再把内部初始计数 `v0` 暴露给用户，初始版本统一展示为 `v1`
+  - **Skill Version Labels Start at v1**: Skill detail pages no longer expose the internal `v0` counter; initial versions now display as `v1`
+
+### 优化 / Improvements
+
+- 🖼️ **Skill 图片资源预览增强**：图片预览支持滚轮缩放、抓手拖拽平移、右下角固定缩放控件、全屏预览、Escape 退出，并移除额外阴影/框感
+  - **Skill Image Resource Preview Improved**: Image previews now support wheel zoom, grab-to-pan, fixed bottom-right zoom controls, fullscreen preview, Escape close, and no extra shadow or frame treatment
+- 📋 **Skill 标题点击复制**：Skill 详情标题保持普通光标和标题视觉，点击即可复制 Skill 名称并显示复制反馈
+  - **Click Skill Title to Copy**: Skill detail titles keep their normal cursor and visual style while clicking copies the Skill name with toast feedback
+- 📦 **大仓库 Skill 导入可读性优化**：Git 导入弹窗变宽变高，结果区域拥有更大的滚动空间，候选卡片更紧凑，便于查看包含大量 Skill 的仓库
+  - **Large Skill Repository Import Readability**: The Git import modal is wider and taller, results get a larger scroll area, and candidate cards are denser for repositories with many Skills
+
+## [0.5.8] - 2026-06-04
+
+### 新功能 / Features
+
+- 🖼️ **图片 Prompt 反推工作流稳定版**：新增独立图片反推入口，可通过视觉模型生成结构化生图 Prompt，支持先预览/复制再决定是否保存，并可选择把原图作为参考图一并保留
+  - **Image Prompt Reverse Workflow Stable Release**: Added a dedicated image reverse-prompt flow that uses vision-capable models to generate structured image-generation prompts, supports preview/copy before saving, and can keep the source image as a reference
+- 🧠 **AI 模型配置与路由收口**：模型配置改为供应商优先的三栏体验，明确区分供应商实例、模型能力和业务路由，支持视觉、生图、推理等能力标记以及批量获取模型
+  - **AI Model Configuration and Routing Consolidated**: Model settings now use a provider-first three-column flow that separates providers, model capabilities, and business routes, with vision/image/reasoning capability flags and batch model discovery
+- 🛒 **Skill 商店扩展**：内置接入 ClawHub 与 skill.sh，并支持远程商店搜索、分类、分页/滚动加载、缓存和完整 Skill 包安装
+  - **Skill Store Expansion**: Added built-in ClawHub and skill.sh sources with remote search, categories, paging/infinite loading, caching, and full Skill package installation
+
+### 问题修复 / Fixes
+
+- 🧩 **Skill 生命周期矩阵加固**：系统性补齐我的 Skill、项目 Skill、Agent Skill、平台安装、copy / symlink、内置 Skill、外部软链接和同名来源 variant 的识别、安装、卸载、删除与展示状态
+  - **Skill Lifecycle Matrix Hardened**: Systematically tightened My Skills, Project Skills, Agent Skills, platform installs, copy/symlink installs, built-in Skills, external symlinks, and same-name source variants across recognition, install, uninstall, delete, and display states
+- 🔄 **来源更新检查更准确**：GitHub / Gitea / 自托管 Git 来源现在可在“我的 Skill”详情页检查和应用更新，并忽略 `__pycache__` 等常见缓存文件，减少本地未修改却误报更新的问题
+  - **More Accurate Source Update Checks**: GitHub, Gitea, and self-hosted Git sourced Skills can now check and apply updates from My Skills detail, while common cache files such as `__pycache__` are ignored to reduce false local-modified reports
+- 🧱 **Agent / 平台卸载一致性**：Cherry Studio 等 Agent Skill 卸载现在同步文件系统与数据库状态，内置 Skill 会被保护，复制安装和软链接安装会给出不同的删除/保留语义
+  - **Agent and Platform Uninstall Consistency**: Agent Skill uninstall paths such as Cherry Studio now keep filesystem and database state in sync, protect built-in Skills, and distinguish copy vs symlink removal semantics
+- 🎨 **生图测试与错误展示修复**：生图请求改走桌面主进程代理以避开浏览器 CORS，超时策略按图片生成场景放宽，并在测试面板展示失败原因而不只依赖 toast
+  - **Image Generation Test and Error Display Fixes**: Image generation requests now go through the desktop main-process proxy to avoid browser CORS, use image-appropriate timeout limits, and show failure details in the test panel instead of only toast notifications
+
+### 优化 / Improvements
+
+- 🧑‍💻 **Skill 文件代码视图优化**：Skill 源码文件视图接入轻量代码编辑器，支持常见语法高亮、行号、自动换行和更准确的文件图标
+  - **Skill File Code View Refined**: Skill source files now use a lightweight code editor with common syntax highlighting, line numbers, soft wrapping, and richer file icons
+- 📜 **Prompt / Skill 版本历史表优化**：版本历史弹窗改为更适合检索和对比的表格化呈现，并补充数据库与 UI 回归测试
+  - **Prompt / Skill Version History Table Polish**: Version history dialogs now use a more scannable table-style presentation with additional database and UI regression coverage
+- ↔️ **Skill 管理动效与布局打磨**：Skill 列表、项目 Skill、Agent Skill、商店和详情页的切换、筛选、搜索、卡片密度和来源标签进一步统一
+  - **Skill Management Motion and Layout Polish**: Skill lists, Project Skills, Agent Skills, stores, and detail pages now have more consistent transitions, filters, search, card density, and source labels
+
+## [0.5.8-beta.3] - 2026-06-02
+
+### 新功能 / Features
+
+- 🧑‍💻 **Skill 文件代码编辑器**：Skill 源码文件视图接入轻量代码编辑器，支持常见语法高亮、行号、自动换行和更准确的文件图标
+  - **Skill File Code Editor**: Skill source files now use a lightweight code editor with common syntax highlighting, line numbers, soft wrapping, and richer file icons
+- 🔄 **GitHub 来源 Skill 更新**：从 GitHub 导入到“我的 Skill”的条目现在可以直接在详情页检查来源更新，并在更新前创建版本快照
+  - **GitHub Source Skill Updates**: Skills imported from GitHub can now check source updates directly from My Skills detail and create a version snapshot before applying updates
+
+### 问题修复 / Fixes
+
+- 🧩 **Skill 生命周期矩阵补强**：继续补齐 Cherry Studio、Agent Skill、项目 Skill、copy / symlink、内置 Skill 和外部软链接的识别、卸载与展示状态
+  - **Skill Lifecycle Matrix Hardened**: Tightened Cherry Studio, Agent Skill, Project Skill, copy / symlink, built-in Skill, and external symlink recognition, uninstall, and display states
+- 📜 **Prompt / Skill 版本历史表优化**：版本历史弹窗改为更适合检索和对比的表格化呈现，并补充数据库与 UI 回归测试
+  - **Prompt / Skill Version History Table Polish**: Version history dialogs now use a more scannable table-style presentation with additional database and UI regression coverage
+- 🧹 **启动日志噪声收敛**：减少开发启动时 DevTools / stale DB lock 相关的误导性日志噪声，并补充启动日志策略测试
+  - **Startup Log Noise Reduced**: Reduced misleading DevTools and stale DB lock noise during development startup and added startup log policy coverage
+
+## [0.5.8-beta.2] - 2026-06-02
+
+### 问题修复 / Fixes
+
+- 🧩 **Skill 生命周期操作补齐**：继续加固项目 Skill、Agent Skill 和平台 Skill 的安装、卸载、删除与软链接路径，减少从不同入口进入时状态不一致的问题
+  - **Skill Lifecycle Actions Hardened**: Further tightened project Skill, Agent Skill, and platform Skill install, uninstall, delete, and symlink paths to reduce state drift across entry points
+- 🗑️ **项目 Skill 删除按钮语义修复**：项目详情页右上角删除项目按钮现在默认使用红色 destructive 样式，避免和普通编辑/刷新操作混淆
+  - **Project Skill Delete Button Semantics Fixed**: The project detail delete action now uses a red destructive style by default so it is visually distinct from normal edit and refresh actions
+- 🔢 **Skill 导航计数与安装状态稳定性**：修复 Skill 分区、Agent 管理和安装状态在切换、刷新后的显示一致性问题
+  - **Skill Navigation Counts and Install State Stabilized**: Fixed display consistency for Skill section counts, Agent management, and install state after switching or refreshing views
+
+### 优化 / Improvements
+
+- ↔️ **Skill 管理横向过渡动画**：我的 Skill、项目 Skill、Agent Skill、商店，以及项目/Agent 内部切换现在使用横向滑入过渡，避免上下跳动带来的割裂感
+  - **Horizontal Skill Management Transitions**: My Skills, Project Skills, Agent Skills, Store, and internal project/agent switches now use horizontal slide transitions instead of vertical jumps
+- 🧪 **发布 CI 运行时同步**：GitHub Actions 发布链路同步到 Node 24，匹配当前桌面端和 CLI 的运行时要求
+  - **Release CI Runtime Synced**: GitHub Actions release jobs now use Node 24 to match the current desktop and CLI runtime requirements
+
+## [0.5.8-beta.1] - 2026-06-01
+
+### 新功能 / Features
+
+- 🖼️ **图片 Prompt 反推工作流**：新增独立的图片反推入口，可通过视觉模型把参考图反推出结构化生图 Prompt，并支持把原图作为参考图一并保存
+  - **Image Prompt Reverse Workflow**: Added a dedicated image prompt reverse flow that uses a vision-capable model to turn a reference image into a structured image-generation prompt, with optional reference-image persistence
+- 🧠 **AI 模型服务重构**：模型服务改为供应商优先的三栏配置体验，区分供应商实例、模型能力和业务路由，支持视觉、生图、推理等能力标记
+  - **AI Model Service Refactor**: The model service now uses a provider-first three-column configuration flow that separates provider instances, model capabilities, and routing, with support for vision, image generation, and reasoning capability flags
+
+### 问题修复 / Fixes
+
+- 🧪 **CLI 版本号同步**：独立 CLI 的 `--version` 与 npm package 版本同步到 `0.5.8-beta.1`，避免继续显示旧的 beta 版本号
+  - **CLI Version Sync**: The standalone CLI `--version` now matches the npm package version `0.5.8-beta.1` instead of reporting an older beta version
+- 🧩 **Skill 生命周期补强**：补齐项目 Skill 分发、卸载、软链接扫描和同名来源识别等高风险路径，降低导入、刷新、删除后状态漂移的风险
+  - **Skill Lifecycle Hardening**: Strengthened project Skill distribution, uninstall, symlink scan discovery, and same-name source identity paths to reduce state drift after import, refresh, or deletion
+
+### 优化 / Improvements
+
+- 🎛️ **模型配置界面收口**：供应商和模型管理拆分为更清晰的配置层级，模型能力用图标表达，模型路由保留文字标签，测试动作统一为试管图标
+  - **Model Configuration UI Refined**: Provider and model management now have clearer configuration boundaries; model capabilities use icons, model routes keep textual chips, and test actions use a unified test-tube icon
+- 📁 **项目 Skill 列表紧凑化**：项目 Skill 结果区从大卡片宫格改为紧凑列表，减少空白和按钮噪音，次要操作改为 icon-only
+  - **Project Skill List Compact View**: The Project Skill result area has been changed from large grid cards to a compact list, reducing whitespace and button noise while moving secondary actions to icon-only controls
+
 ## [0.5.7] - 2026-05-29
 
 ### 新功能 / Features

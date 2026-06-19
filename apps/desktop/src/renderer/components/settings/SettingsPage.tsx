@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import type { ComponentType, SVGProps } from "react";
 import {
   SettingsIcon,
@@ -19,21 +19,11 @@ import {
   TerminalSquareIcon,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import { GeneralSettings } from "./GeneralSettings";
-import { AppearanceSettings } from "./AppearanceSettings";
-import { LanguageSettings } from "./LanguageSettings";
-import { SecuritySettings } from "./SecuritySettings";
-import { ShortcutsSettings } from "./ShortcutsSettings";
-import { AboutSettings } from "./AboutSettings";
-import { CLISettings } from "./CLISettings";
-import { DataSettings } from "./DataSettings";
 import type { DataSettingsSubsectionId } from "./DataSettings";
-import { AISettingsPrototype } from "./AISettingsPrototype";
-import { SkillSettings } from "./SkillSettings";
-import { WebDeviceSettings } from "./WebDeviceSettings";
-import { WebWorkspaceSettings } from "./WebWorkspaceSettings";
 import { useSettingsStore } from "../../stores/settings.store";
+import { useUIStore, type SettingsSectionId } from "../../stores/ui.store";
 import { isWebRuntime } from "../../runtime";
+import { Spinner } from "../ui";
 
 interface BackupImportControllerLike {
   requestFileSelection: () => void;
@@ -69,8 +59,69 @@ const WEB_SETTINGS_MENU = [
   { id: "about", labelKey: "settings.about", icon: InfoIcon },
 ] as const;
 
+const GeneralSettings = lazy(() =>
+  import("./GeneralSettings").then((module) => ({
+    default: module.GeneralSettings,
+  })),
+);
+const AppearanceSettings = lazy(() =>
+  import("./AppearanceSettings").then((module) => ({
+    default: module.AppearanceSettings,
+  })),
+);
+const LanguageSettings = lazy(() =>
+  import("./LanguageSettings").then((module) => ({
+    default: module.LanguageSettings,
+  })),
+);
+const SecuritySettings = lazy(() =>
+  import("./SecuritySettings").then((module) => ({
+    default: module.SecuritySettings,
+  })),
+);
+const ShortcutsSettings = lazy(() =>
+  import("./ShortcutsSettings").then((module) => ({
+    default: module.ShortcutsSettings,
+  })),
+);
+const AboutSettings = lazy(() =>
+  import("./AboutSettings").then((module) => ({
+    default: module.AboutSettings,
+  })),
+);
+const CLISettings = lazy(() =>
+  import("./CLISettings").then((module) => ({
+    default: module.CLISettings,
+  })),
+);
+const DataSettings = lazy(() =>
+  import("./DataSettings").then((module) => ({
+    default: module.DataSettings,
+  })),
+);
+const AISettingsPrototype = lazy(() =>
+  import("./AISettingsPrototype").then((module) => ({
+    default: module.AISettingsPrototype,
+  })),
+);
+const SkillSettings = lazy(() =>
+  import("./SkillSettings").then((module) => ({
+    default: module.SkillSettings,
+  })),
+);
+const WebDeviceSettings = lazy(() =>
+  import("./WebDeviceSettings").then((module) => ({
+    default: module.WebDeviceSettings,
+  })),
+);
+const WebWorkspaceSettings = lazy(() =>
+  import("./WebWorkspaceSettings").then((module) => ({
+    default: module.WebWorkspaceSettings,
+  })),
+);
+
 interface SettingsSubmenuItem {
-  id: DataSettingsSubsectionId;
+  id: string;
   labelKey: string;
   fallback: string;
   icon: ComponentType<SVGProps<SVGSVGElement>>;
@@ -79,7 +130,7 @@ interface SettingsSubmenuItem {
 const DATA_SETTINGS_SUBMENU_GROUPS: Array<{
   labelKey: string;
   fallback: string;
-  items: SettingsSubmenuItem[];
+  items: Array<SettingsSubmenuItem & { id: DataSettingsSubsectionId }>;
 }> = [
   {
     labelKey: "settings.dataSubmenuBasic",
@@ -137,9 +188,26 @@ const DATA_SETTINGS_SUBMENU_GROUPS: Array<{
   },
 ];
 
-export function SettingsPage({ onBack, backupImportController }: SettingsPageProps) {
+function SettingsContentFallback({ label }: { label: string }) {
+  return (
+    <div className="flex min-h-64 items-center justify-center">
+      <Spinner size="lg" tone="muted" label={label} />
+    </div>
+  );
+}
+
+export function SettingsPage({
+  onBack,
+  backupImportController,
+}: SettingsPageProps) {
   const webRuntime = isWebRuntime();
   const settingsMenu = webRuntime ? WEB_SETTINGS_MENU : DESKTOP_SETTINGS_MENU;
+  const pendingSettingsSection = useUIStore(
+    (state) => state.pendingSettingsSection,
+  );
+  const consumeSettingsSectionRequest = useUIStore(
+    (state) => state.consumeSettingsSectionRequest,
+  );
   const syncProvider = useSettingsStore((state) => state.syncProvider);
   const webdavEnabled = useSettingsStore((state) => state.webdavEnabled);
   const selfHostedSyncEnabled = useSettingsStore(
@@ -152,6 +220,20 @@ export function SettingsPage({ onBack, backupImportController }: SettingsPagePro
   const [activeDataSubsection, setActiveDataSubsection] =
     useState<DataSettingsSubsectionId>("local");
   const { t } = useTranslation();
+
+  useEffect(() => {
+    if (!pendingSettingsSection) {
+      return;
+    }
+
+    const requestedSection = consumeSettingsSectionRequest();
+    if (
+      requestedSection &&
+      settingsMenu.some((item) => item.id === requestedSection)
+    ) {
+      setActiveSection(requestedSection as SettingsSectionId);
+    }
+  }, [consumeSettingsSectionRequest, pendingSettingsSection, settingsMenu]);
 
   const renderContent = () => {
     switch (activeSection) {
@@ -188,7 +270,12 @@ export function SettingsPage({ onBack, backupImportController }: SettingsPagePro
   };
   const activeSubmenu =
     !webRuntime && activeSection === "data"
-      ? DATA_SETTINGS_SUBMENU_GROUPS
+      ? {
+          groups: DATA_SETTINGS_SUBMENU_GROUPS,
+          activeId: activeDataSubsection,
+          onSelect: (id: string) =>
+            setActiveDataSubsection(id as DataSettingsSubsectionId),
+        }
       : null;
   const enabledSubsections = useMemo(
     () => ({
@@ -206,10 +293,11 @@ export function SettingsPage({ onBack, backupImportController }: SettingsPagePro
         {/* 返回按钮 */}
         <div className="p-3 border-b border-border">
           <button
+            type="button"
             onClick={onBack}
             className="flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground transition-colors"
           >
-            <ArrowLeftIcon className="w-4 h-4" />
+            <ArrowLeftIcon className="w-4 h-4" aria-hidden="true" />
             <span>{t("common.back")}</span>
           </button>
         </div>
@@ -219,14 +307,16 @@ export function SettingsPage({ onBack, backupImportController }: SettingsPagePro
           {settingsMenu.map((item) => (
             <button
               key={item.id}
+              type="button"
               onClick={() => setActiveSection(item.id)}
+              aria-pressed={activeSection === item.id}
               className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-[13px] transition-all duration-quick ${
                 activeSection === item.id
                   ? "bg-primary text-white shadow-sm"
                   : "text-foreground/80 hover:bg-muted/70"
               }`}
             >
-              <item.icon className="w-4 h-4" />
+              <item.icon className="w-4 h-4" aria-hidden="true" />
               <span>{t(item.labelKey)}</span>
             </button>
           ))}
@@ -236,33 +326,37 @@ export function SettingsPage({ onBack, backupImportController }: SettingsPagePro
       {activeSubmenu ? (
         <div className="w-56 app-wallpaper-panel border-r border-border flex flex-col">
           <nav className="flex-1 overflow-y-auto p-2 space-y-1">
-            {activeSubmenu.map((group) => (
+            {activeSubmenu.groups.map((group) => (
               <section key={group.labelKey} className="space-y-1 pb-3">
                 <div className="flex items-center gap-2 px-2 py-1.5 text-[12px] text-muted-foreground">
                   <span className="shrink-0">
-                    {t(group.labelKey, group.fallback)}
+                    {String(t(group.labelKey, group.fallback))}
                   </span>
                   <div className="h-px flex-1 bg-border" />
                 </div>
                 {group.items.map((item) => (
                   <button
                     key={item.id}
-                    onClick={() => setActiveDataSubsection(item.id)}
-                    aria-label={`${t(item.labelKey, item.fallback)}${
+                    type="button"
+                    onClick={() => activeSubmenu.onSelect(item.id)}
+                    aria-pressed={activeSubmenu.activeId === item.id}
+                    aria-label={`${String(t(item.labelKey, item.fallback))}${
                       item.id in enabledSubsections &&
-                      enabledSubsections[item.id as keyof typeof enabledSubsections]
+                      enabledSubsections[
+                        item.id as keyof typeof enabledSubsections
+                      ]
                         ? ` ${t("common.enabled")}`
                         : ""
                     }`}
                     className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-[13px] transition-all duration-quick ${
-                      activeDataSubsection === item.id
+                      activeSubmenu.activeId === item.id
                         ? "bg-primary text-white shadow-sm"
                         : "text-foreground/80 hover:bg-muted/70"
                     }`}
                   >
-                    <item.icon className="w-4 h-4" />
+                    <item.icon className="w-4 h-4" aria-hidden="true" />
                     <span className="min-w-0 flex-1 text-left">
-                      {t(item.labelKey, item.fallback)}
+                      {String(t(item.labelKey, item.fallback))}
                     </span>
                     {item.id in enabledSubsections &&
                     enabledSubsections[
@@ -271,13 +365,11 @@ export function SettingsPage({ onBack, backupImportController }: SettingsPagePro
                       <span
                         className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium ${
                           syncProvider ===
-                          (item.id === "selfHosted"
-                            ? "self-hosted"
-                            : item.id)
-                            ? activeDataSubsection === item.id
+                          (item.id === "selfHosted" ? "self-hosted" : item.id)
+                            ? activeSubmenu.activeId === item.id
                               ? "bg-white/20 text-white"
                               : "bg-primary/10 text-primary"
-                            : activeDataSubsection === item.id
+                            : activeSubmenu.activeId === item.id
                               ? "bg-white/15 text-white/90"
                               : "bg-muted text-muted-foreground"
                         }`}
@@ -294,18 +386,46 @@ export function SettingsPage({ onBack, backupImportController }: SettingsPagePro
       ) : null}
 
       {/* 设置内容区 - 自适应宽度 */}
-      <div className="flex-1 overflow-y-auto px-6 py-5 app-wallpaper-section">
-        <div className="max-w-4xl mx-auto">
-          <h1 className="text-lg font-semibold mb-4">
-            {t(
-              settingsMenu.find((m) => m.id === activeSection)?.labelKey || "",
-            )}
-          </h1>
+      <div
+        className={
+          activeSection === "ai"
+            ? "flex-1 overflow-hidden app-wallpaper-section"
+            : "flex-1 overflow-y-auto px-5 py-5 app-wallpaper-section sm:px-6 xl:px-8 2xl:px-10"
+        }
+      >
+        <div
+          data-testid="settings-content-shell"
+          className={
+            activeSection === "ai"
+              ? "h-full max-w-none"
+              : "w-full max-w-5xl xl:max-w-6xl 2xl:max-w-7xl"
+          }
+        >
+          {activeSection === "ai" ? null : (
+            <h1 className="text-lg font-semibold mb-4">
+              {t(
+                settingsMenu.find((m) => m.id === activeSection)?.labelKey ||
+                  "",
+              )}
+            </h1>
+          )}
           <div
             key={activeSection}
-            className="animate-in fade-in slide-in-from-bottom-2 duration-base"
+            className={
+              activeSection === "ai"
+                ? "h-full animate-in fade-in slide-in-from-bottom-2 duration-base"
+                : "animate-in fade-in slide-in-from-bottom-2 duration-base"
+            }
           >
-            {renderContent()}
+            <Suspense
+              fallback={
+                <SettingsContentFallback
+                  label={t("common.loading", "Loading...")}
+                />
+              }
+            >
+              {renderContent()}
+            </Suspense>
           </div>
         </div>
       </div>

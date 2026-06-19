@@ -193,6 +193,11 @@ interface StreamState {
   chunkCount: number;
 }
 
+const IMAGE_GENERATION_TIMEOUT_MS = 300_000;
+const AI_CONNECTION_TEST_MAX_TOKENS = 8;
+const AI_CONNECTION_TEST_TIMEOUT_MS = 12_000;
+const AI_CONNECTION_TEST_PROMPT = "Reply with exactly: OK";
+
 type ResolvedProtocol = {
   protocol: AIProtocol;
   explicit: boolean;
@@ -351,6 +356,123 @@ function createFetchResponseLike(response: Response): ResponseLike {
   };
 }
 
+async function requestAIEndpoint(
+  request: {
+    method: "GET" | "POST";
+    url: string;
+    headers: Record<string, string>;
+    body?: string;
+    timeoutMs?: number;
+  },
+): Promise<ResponseLike> {
+  const transport = getAITransport();
+  if (transport) {
+    return createResponseLike(await transport.request(request));
+  }
+
+  return createFetchResponseLike(
+    await fetch(request.url, {
+      method: request.method,
+      headers: request.headers,
+      body: request.body,
+    }),
+  );
+}
+
+function getResponseHeader(
+  headers: Record<string, string>,
+  name: string,
+): string {
+  const lowerName = name.toLowerCase();
+  const match = Object.entries(headers).find(
+    ([key]) => key.toLowerCase() === lowerName,
+  );
+  return match?.[1] ?? "";
+}
+
+function isHtmlErrorPayload(text: string, headers: Record<string, string>): boolean {
+  const contentType = getResponseHeader(headers, "content-type").toLowerCase();
+  const trimmed = text.trimStart().toLowerCase();
+  return (
+    contentType.includes("text/html") ||
+    trimmed.startsWith("<!doctype html") ||
+    trimmed.startsWith("<html")
+  );
+}
+
+function extractHtmlTitle(text: string): string | null {
+  const match = text.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  return match?.[1]?.replace(/\s+/g, " ").trim() || null;
+}
+
+function formatGatewayTimeoutMessage(operation: string, status: number): string {
+  return `${operation} gateway timed out (${status}). The provider or proxy did not finish before its own timeout.`;
+}
+
+function isGptImageModel(model: string): boolean {
+  return model.trim().toLowerCase().startsWith("gpt-image-");
+}
+
+function parseStructuredErrorMessage(text: string): string | null {
+  try {
+    const errorJson = JSON.parse(text);
+    const message =
+      errorJson.error?.message ||
+      errorJson.error?.status ||
+      errorJson.error?.type ||
+      errorJson.message ||
+      errorJson.detail ||
+      (typeof errorJson.error === "string" ? errorJson.error : null);
+
+    if (!message) {
+      return null;
+    }
+
+    if (errorJson.error?.code) {
+      return `${message} (code: ${errorJson.error.code})`;
+    }
+    if (errorJson.error?.type && errorJson.error.type !== message) {
+      return `[${errorJson.error.type}] ${message}`;
+    }
+    return message;
+  } catch {
+    return null;
+  }
+}
+
+async function getFormattedErrorMessageFromResponse(
+  response: ResponseLike,
+  options: {
+    operation?: string;
+    fallback?: string;
+    maxTextLength?: number;
+  } = {},
+): Promise<string> {
+  const errorText = response.error ?? (await response.text());
+  const operation = options.operation ?? "API request";
+  const fallback = options.fallback ?? `API 请求失败 (${response.status})`;
+
+  if (response.status === 504) {
+    return formatGatewayTimeoutMessage(operation, response.status);
+  }
+
+  const structuredMessage = parseStructuredErrorMessage(errorText);
+  if (structuredMessage) {
+    return structuredMessage;
+  }
+
+  if (errorText && isHtmlErrorPayload(errorText, response.headers)) {
+    const title = extractHtmlTitle(errorText);
+    return title ? `${fallback}: ${title}` : fallback;
+  }
+
+  if (errorText) {
+    return errorText.slice(0, options.maxTextLength ?? 200);
+  }
+
+  return fallback;
+}
+
 function createStreamState(): StreamState {
   return {
     fullContent: "",
@@ -418,12 +540,6 @@ async function processStreamTextChunk(
         state.fullContent += delta.content;
         onStream?.(delta.content);
         streamCallbacks?.onContent?.(delta.content);
-        if (state.chunkCount === 1) {
-          console.log(
-            "[AI Stream] First content chunk received:",
-            delta.content.slice(0, 50),
-          );
-        }
       }
 
       if (options?.yieldToUi && deltasSinceYield >= 20) {
@@ -436,11 +552,6 @@ async function processStreamTextChunk(
   }
 
   if (options?.yieldToUi) {
-    if (state.chunkCount > 0 && state.chunkCount % 50 === 0) {
-      console.log(
-        `[AI Stream] Yielding at chunk ${state.chunkCount}, content length: ${state.fullContent.length}`,
-      );
-    }
     await yieldToEventLoop();
   }
 }
@@ -510,20 +621,7 @@ function toAnthropicMessageContent(content: ChatMessageContent): string | Anthro
 async function getErrorMessageFromResponse(
   response: ResponseLike,
 ): Promise<string> {
-  const errorText = await response.text();
-  let errorMessage = `API 请求失败 (${response.status})`;
-
-  try {
-    const errorJson = JSON.parse(errorText);
-    errorMessage =
-      errorJson.error?.message || errorJson.message || errorMessage;
-  } catch {
-    if (errorText) {
-      errorMessage = errorText.slice(0, 200);
-    }
-  }
-
-  return errorMessage;
+  return getFormattedErrorMessageFromResponse(response);
 }
 
 /**
@@ -553,6 +651,7 @@ export async function chatCompletion(
         schema: Record<string, unknown>;
       };
     };
+    timeoutMs?: number;
   },
 ): Promise<ChatCompletionResult> {
   const { provider, apiKey, apiUrl, model, chatParams } = config;
@@ -648,6 +747,7 @@ export async function chatCompletion(
             url: endpoint,
             headers,
             body: requestBody,
+            timeoutMs: options?.timeoutMs,
           }),
         )
       : createFetchResponseLike(
@@ -768,6 +868,7 @@ export async function chatCompletion(
           url: endpoint,
           headers,
           body: requestBody,
+          timeoutMs: options?.timeoutMs,
         },
         {
           onChunk: (chunk) => {
@@ -814,6 +915,7 @@ export async function chatCompletion(
         url: endpoint,
         headers,
         body: requestBody,
+        timeoutMs: options?.timeoutMs,
       });
       return { response: createResponseLike(response) };
     }
@@ -825,7 +927,6 @@ export async function chatCompletion(
     });
 
     if (mergedParams.stream) {
-      console.log("[AI Service] Starting stream response handling...");
       return {
         streamResult: await handleStreamResponse(
           response,
@@ -904,15 +1005,6 @@ export async function chatCompletion(
       throw new Error("AI 返回结果为空");
     }
 
-    // 流式输出处理 / Streaming output handling
-    // Debug: Log streaming status / 调试：记录流式状态
-    console.log(
-      "[AI Service] Stream mode:",
-      mergedParams.stream,
-      "Callbacks provided:",
-      !!options?.streamCallbacks,
-    );
-
     // 非流式响应 / Non-streaming response
     const data: ChatCompletionResponse = await response.json();
 
@@ -957,10 +1049,6 @@ async function handleStreamResponse(
     while (true) {
       const { done, value } = await reader.read();
       if (done) {
-        console.log(
-          "[AI Stream] Stream completed, total chunks:",
-          state.chunkCount,
-        );
         break;
       }
 
@@ -1010,25 +1098,22 @@ export async function testAIConnection(
   streamCallbacks?: StreamCallbacks,
 ): Promise<AITestResult> {
   const startTime = Date.now();
-  const prompt = testPrompt || "Hello! Please respond with a brief greeting.";
+  const prompt = testPrompt || AI_CONNECTION_TEST_PROMPT;
 
-  // 使用配置中的参数，但限制 maxTokens 用于测试
-  // Use config parameters, but limit maxTokens for testing
-  const useStream =
-    resolveAIProtocol(config) === "anthropic"
-      ? false
-      : (config.chatParams?.stream ?? false);
-  const useThinking = config.chatParams?.enableThinking ?? false;
+  // 连接测试只验证端点和模型能否响应，不能继承长文本生成参数。
+  // A connection test is a lightweight probe, not a full generation benchmark.
 
   try {
     const result = await chatCompletion(
       config,
       [{ role: "user", content: prompt }],
       {
-        maxTokens: 2048,
-        stream: useStream,
-        enableThinking: useThinking,
+        temperature: 0,
+        maxTokens: AI_CONNECTION_TEST_MAX_TOKENS,
+        stream: false,
+        enableThinking: false,
         streamCallbacks,
+        timeoutMs: AI_CONNECTION_TEST_TIMEOUT_MS,
       },
     );
 
@@ -1266,62 +1351,38 @@ async function generateImageGemini(
     };
   }
 
-  const response = await fetch(endpoint, {
+  const response = await requestAIEndpoint({
     method: "POST",
     headers,
     body: JSON.stringify(body),
+    url: endpoint,
+    timeoutMs: IMAGE_GENERATION_TIMEOUT_MS,
   });
 
   if (!response.ok) {
-    const errorText = await response.text();
-    let errorMessage = `Gemini image generation failed (${response.status})`;
-    try {
-      const errorJson = JSON.parse(errorText);
-      errorMessage =
-        errorJson.error?.message ||
-        errorJson.error?.status ||
-        errorJson.message ||
-        (typeof errorJson.error === "string" ? errorJson.error : null) ||
-        errorMessage;
-
-      // Append error code if available
-      if (errorJson.error?.code) {
-        errorMessage = `${errorMessage} (code: ${errorJson.error.code})`;
-      }
-    } catch {
-      if (errorText)
-        errorMessage = `${errorMessage}: ${errorText.slice(0, 500)}`;
-    }
-    throw new Error(errorMessage);
+    throw new Error(
+      await getFormattedErrorMessageFromResponse(response, {
+        operation: "Image generation",
+        fallback: `Gemini image generation failed (${response.status})`,
+        maxTextLength: 500,
+      }),
+    );
   }
 
-  const result = await response.json();
+  const result = await response.json<any>();
 
   // Handle different response formats
   // 处理不同的响应格式
-  console.log(
-    "[generateImageGemini] Response received:",
-    JSON.stringify(result, null, 2).slice(0, 2000),
-  );
-
   if (result.candidates) {
     // Native Gemini format
     const candidate = result.candidates[0];
     const parts = candidate?.content?.parts || [];
-    console.log(
-      "[generateImageGemini] Gemini native format, parts count:",
-      parts.length,
-    );
 
     const imagePart = parts.find((p: any) =>
       p.inlineData?.mimeType?.startsWith("image/"),
     );
 
     if (imagePart?.inlineData) {
-      console.log(
-        "[generateImageGemini] Found image data, mimeType:",
-        imagePart.inlineData.mimeType,
-      );
       return {
         created: Date.now(),
         data: [
@@ -1335,20 +1396,14 @@ async function generateImageGemini(
     // Check if there's text response (might indicate an error or refusal)
     const textPart = parts.find((p: any) => p.text);
     if (textPart?.text) {
-      console.warn(
-        "[generateImageGemini] Got text instead of image:",
-        textPart.text,
-      );
+      console.warn("[generateImageGemini] Got text instead of image");
       throw new Error(
         `Model returned text instead of an image: ${textPart.text.slice(0, 200)}`,
       );
     }
 
     // No image in response
-    console.error(
-      "[generateImageGemini] No image data in candidates. Parts:",
-      parts,
-    );
+    console.error("[generateImageGemini] No image data in candidates");
     throw new Error(
       "Gemini response did not contain image data. Please ensure you are using a model that supports image generation.",
     );
@@ -1357,18 +1412,12 @@ async function generateImageGemini(
   if (result.choices) {
     // OpenAI-compatible format from proxy
     const content = result.choices[0]?.message?.content;
-    console.log(
-      "[generateImageGemini] OpenAI format, content type:",
-      typeof content,
-      typeof content === "string" ? content.slice(0, 200) : "(array or object)",
-    );
 
     // Check if content contains image URL or base64
     if (typeof content === "string") {
       // Try to extract URL if present
       const urlMatch = content.match(/https?:\/\/[^\s"'<>]+/i);
       if (urlMatch) {
-        console.log("[generateImageGemini] Found URL in content:", urlMatch[0]);
         return {
           created: Date.now(),
           data: [{ url: urlMatch[0] }],
@@ -1379,7 +1428,6 @@ async function generateImageGemini(
         content.startsWith("data:image/") ||
         content.match(/^[A-Za-z0-9+/=]{100,}/)
       ) {
-        console.log("[generateImageGemini] Found base64 in content");
         return {
           created: Date.now(),
           data: [
@@ -1389,10 +1437,7 @@ async function generateImageGemini(
       }
 
       // Content is text, not image - might be refusal or error
-      console.warn(
-        "[generateImageGemini] Content is text, not image:",
-        content.slice(0, 500),
-      );
+      console.warn("[generateImageGemini] Content is text, not image");
       throw new Error(
         `Model returned text instead of an image: ${content.slice(0, 300)}`,
       );
@@ -1400,17 +1445,10 @@ async function generateImageGemini(
 
     // Content might be array with image_url
     if (Array.isArray(result.choices[0]?.message?.content)) {
-      console.log(
-        "[generateImageGemini] Content is array, looking for image_url...",
-      );
       const imgContent = result.choices[0].message.content.find(
         (c: any) => c.type === "image_url",
       );
       if (imgContent?.image_url?.url) {
-        console.log(
-          "[generateImageGemini] Found image_url:",
-          imgContent.image_url.url.slice(0, 100),
-        );
         const url = imgContent.image_url.url;
         if (url.startsWith("data:image/")) {
           return {
@@ -1429,19 +1467,10 @@ async function generateImageGemini(
     // 检查 message.images 数组（某些代理使用此格式）
     const images = result.choices[0]?.message?.images;
     if (Array.isArray(images) && images.length > 0) {
-      console.log(
-        "[generateImageGemini] Found message.images array:",
-        images.length,
-        "images",
-      );
       const firstImage = images[0];
       const imageUrl = firstImage?.image_url?.url || firstImage?.url;
 
       if (imageUrl) {
-        console.log(
-          "[generateImageGemini] Extracted image URL:",
-          imageUrl.slice(0, 100),
-        );
         if (imageUrl.startsWith("data:image/")) {
           return {
             created: Date.now(),
@@ -1466,10 +1495,7 @@ async function generateImageGemini(
   }
 
   // If we got here, response format is unexpected
-  console.error(
-    "[generateImageGemini] Unexpected response format. Full response:",
-    JSON.stringify(result, null, 2),
-  );
+  console.error("[generateImageGemini] Unexpected response format");
   throw new Error(
     `Failed to extract image from response. Response format: ${JSON.stringify(result).slice(0, 500)}`,
   );
@@ -1516,8 +1542,11 @@ async function generateImageOpenAI(
   const body: Record<string, any> = {
     prompt,
     model: model || "dall-e-3",
-    n: options?.n ?? 1,
   };
+  const imageCount = options?.n ?? 1;
+  if (imageCount > 1 || !isGptImageModel(model)) {
+    body.n = imageCount;
+  }
 
   if (options?.size) body.size = options.size;
   if (options?.quality) body.quality = options.quality;
@@ -1525,40 +1554,22 @@ async function generateImageOpenAI(
   if (options?.response_format !== undefined)
     body.response_format = options.response_format;
 
-  const response = await fetch(endpoint, {
+  const response = await requestAIEndpoint({
     method: "POST",
     headers,
     body: JSON.stringify(body),
+    url: endpoint,
+    timeoutMs: IMAGE_GENERATION_TIMEOUT_MS,
   });
 
   if (!response.ok) {
-    const errorText = await response.text();
-    let errorMessage = `Image generation failed (${response.status})`;
-    // Image generation failed
-    try {
-      const errorJson = JSON.parse(errorText);
-      // Try different error message formats
-      // 尝试不同的错误消息格式
-      errorMessage =
-        errorJson.error?.message ||
-        errorJson.error?.type ||
-        errorJson.message ||
-        errorJson.detail ||
-        (typeof errorJson.error === "string" ? errorJson.error : null) ||
-        errorMessage;
-
-      // If we have additional error info, append it
-      // 如果有更多错误信息，附加上去
-      if (errorJson.error?.code) {
-        errorMessage = `${errorMessage} (code: ${errorJson.error.code})`;
-      }
-      if (errorJson.error?.type && errorJson.error?.type !== errorMessage) {
-        errorMessage = `[${errorJson.error.type}] ${errorMessage}`;
-      }
-    } catch {
-      if (errorText) errorMessage = errorText.slice(0, 500);
-    }
-    throw new Error(errorMessage);
+    throw new Error(
+      await getFormattedErrorMessageFromResponse(response, {
+        operation: "Image generation",
+        fallback: `Image generation failed (${response.status})`,
+        maxTextLength: 500,
+      }),
+    );
   }
 
   return await response.json();
@@ -1591,22 +1602,27 @@ async function generateImageFlux(
     }
   }
 
-  const response = await fetch(endpoint, {
+  const response = await requestAIEndpoint({
     method: "POST",
+    url: endpoint,
     headers: {
       "Content-Type": "application/json",
       "X-Key": apiKey,
     },
     body: JSON.stringify(body),
+    timeoutMs: IMAGE_GENERATION_TIMEOUT_MS,
   });
 
   if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`FLUX image generation failed: ${errorText.slice(0, 200)}`);
-    // FLUX image generation failed
+    throw new Error(
+      await getFormattedErrorMessageFromResponse(response, {
+        operation: "Image generation",
+        fallback: `FLUX image generation failed (${response.status})`,
+      }),
+    );
   }
 
-  const result = await response.json();
+  const result = await response.json<any>();
   return {
     created: Date.now(),
     data: [{ url: result.sample || result.url || result.image }],
@@ -1631,24 +1647,27 @@ async function generateImageIdeogram(
     },
   };
 
-  const response = await fetch(endpoint, {
+  const response = await requestAIEndpoint({
     method: "POST",
+    url: endpoint,
     headers: {
       "Content-Type": "application/json",
       "Api-Key": apiKey,
     },
     body: JSON.stringify(body),
+    timeoutMs: IMAGE_GENERATION_TIMEOUT_MS,
   });
 
   if (!response.ok) {
-    const errorText = await response.text();
     throw new Error(
-      `Ideogram image generation failed: ${errorText.slice(0, 200)}`,
+      await getFormattedErrorMessageFromResponse(response, {
+        operation: "Image generation",
+        fallback: `Ideogram image generation failed (${response.status})`,
+      }),
     );
-    // Ideogram image generation failed
   }
 
-  const result = await response.json();
+  const result = await response.json<any>();
   const images = result.data || [];
   return {
     created: Date.now(),
@@ -1674,24 +1693,27 @@ async function generateImageRecraft(
 
   if (options?.size) body.size = options.size;
 
-  const response = await fetch(endpoint, {
+  const response = await requestAIEndpoint({
     method: "POST",
+    url: endpoint,
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${apiKey}`,
     },
     body: JSON.stringify(body),
+    timeoutMs: IMAGE_GENERATION_TIMEOUT_MS,
   });
 
   if (!response.ok) {
-    const errorText = await response.text();
     throw new Error(
-      `Recraft image generation failed: ${errorText.slice(0, 200)}`,
+      await getFormattedErrorMessageFromResponse(response, {
+        operation: "Image generation",
+        fallback: `Recraft image generation failed (${response.status})`,
+      }),
     );
-    // Recraft image generation failed
   }
 
-  const result = await response.json();
+  const result = await response.json<any>();
   return {
     created: Date.now(),
     data: result.data || [{ url: result.image?.url }],
@@ -1721,34 +1743,48 @@ async function generateImageReplicate(
     body.input.aspect_ratio = options.aspect_ratio;
   }
 
-  const response = await fetch(endpoint, {
+  const response = await requestAIEndpoint({
     method: "POST",
+    url: endpoint,
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${apiKey}`,
     },
     body: JSON.stringify(body),
+    timeoutMs: IMAGE_GENERATION_TIMEOUT_MS,
   });
 
   if (!response.ok) {
-    const errorText = await response.text();
     throw new Error(
-      `Replicate image generation failed: ${errorText.slice(0, 200)}`,
+      await getFormattedErrorMessageFromResponse(response, {
+        operation: "Image generation",
+        fallback: `Replicate image generation failed (${response.status})`,
+      }),
     );
-    // Replicate image generation failed
   }
 
-  const prediction = await response.json();
+  const prediction = await response.json<any>();
 
   // Replicate 是异步的，需要轮询结果
   // Replicate is asynchronous, need to poll for results
   let result = prediction;
   while (result.status === "starting" || result.status === "processing") {
     await new Promise((resolve) => setTimeout(resolve, 1000));
-    const pollResponse = await fetch(result.urls.get, {
+    const pollResponse = await requestAIEndpoint({
+      method: "GET",
+      url: result.urls.get,
       headers: { Authorization: `Bearer ${apiKey}` },
+      timeoutMs: IMAGE_GENERATION_TIMEOUT_MS,
     });
-    result = await pollResponse.json();
+    if (!pollResponse.ok) {
+      throw new Error(
+        await getFormattedErrorMessageFromResponse(pollResponse, {
+          operation: "Image generation",
+          fallback: `Replicate image generation failed (${pollResponse.status})`,
+        }),
+      );
+    }
+    result = await pollResponse.json<any>();
   }
 
   if (result.status === "failed") {
@@ -1793,25 +1829,28 @@ async function generateImageStability(
     }
   }
 
-  const response = await fetch(endpoint, {
+  const response = await requestAIEndpoint({
     method: "POST",
+    url: endpoint,
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${apiKey}`,
       Accept: "application/json",
     },
     body: JSON.stringify(body),
+    timeoutMs: IMAGE_GENERATION_TIMEOUT_MS,
   });
 
   if (!response.ok) {
-    const errorText = await response.text();
     throw new Error(
-      `Stability AI image generation failed: ${errorText.slice(0, 200)}`,
+      await getFormattedErrorMessageFromResponse(response, {
+        operation: "Image generation",
+        fallback: `Stability AI image generation failed (${response.status})`,
+      }),
     );
-    // Stability AI image generation failed
   }
 
-  const result = await response.json();
+  const result = await response.json<any>();
   return {
     created: Date.now(),
     data:

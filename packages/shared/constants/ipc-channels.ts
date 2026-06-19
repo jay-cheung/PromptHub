@@ -26,6 +26,11 @@ export const IPC_CHANNELS = {
    * 若 SQLite 已有数据则直接返回 { imported: false }（防止覆盖）。
    */
   PROMPT_MIGRATE_IDB_BATCH: "prompt:migrateIdbBatch",
+  PROMPT_MOVE: "prompt:move",
+  PROMPT_RELATION_CREATE: "promptRelation:create",
+  PROMPT_RELATION_LIST: "promptRelation:list",
+  PROMPT_RELATION_UPDATE: "promptRelation:update",
+  PROMPT_RELATION_DELETE: "promptRelation:delete",
 
   // Version
   VERSION_GET_ALL: "version:getAll",
@@ -107,10 +112,13 @@ export const IPC_CHANNELS = {
   // SKILL.md Multi-Platform Installation
   SKILL_GET_SUPPORTED_PLATFORMS: "skill:getSupportedPlatforms",
   SKILL_DETECT_PLATFORMS: "skill:detectPlatforms",
+  SKILL_SCAN_PLATFORM_SKILLS: "skill:scanPlatformSkills",
+  SKILL_UNINSTALL_PLATFORM_SKILL: "skill:uninstallPlatformSkill",
   SKILL_INSTALL_MD: "skill:installMd",
   SKILL_UNINSTALL_MD: "skill:uninstallMd",
   SKILL_GET_MD_INSTALL_STATUS: "skill:getMdInstallStatus",
   SKILL_GET_MD_INSTALL_STATUS_BATCH: "skill:getMdInstallStatusBatch",
+  SKILL_GET_MD_INSTALL_STATUS_DETAILS: "skill:getMdInstallStatusDetails",
   SKILL_INSTALL_MD_SYMLINK: "skill:installMdSymlink",
   SKILL_FETCH_REMOTE_CONTENT: "skill:fetchRemoteContent",
   SKILL_FETCH_REMOTE_CONTENT_BYTES: "skill:fetchRemoteContentBytes",
@@ -131,9 +139,12 @@ export const IPC_CHANNELS = {
   SKILL_WRITE_LOCAL_FILE_BY_PATH: "skill:writeLocalFileByPath",
   SKILL_WRITE_LOCAL_FILE_BUFFER_BY_PATH: "skill:writeLocalFileBufferByPath",
   SKILL_DELETE_LOCAL_FILE_BY_PATH: "skill:deleteLocalFileByPath",
+  SKILL_GET_LOCAL_PATH_STATUS: "skill:getLocalPathStatus",
   SKILL_CREATE_LOCAL_DIR_BY_PATH: "skill:createLocalDirByPath",
   SKILL_COPY_REPO_BY_PATH_TO_DIRECTORY: "skill:copyRepoByPathToDirectory",
   SKILL_SAVE_TO_REPO: "skill:saveToRepo",
+  SKILL_SAVE_REMOTE_GIT_TO_REPO: "skill:saveRemoteGitToRepo",
+  SKILL_SAVE_REMOTE_ZIP_TO_REPO: "skill:saveRemoteZipToRepo",
   SKILL_GET_REPO_PATH: "skill:getRepoPath",
   SKILL_SYNC_FROM_REPO: "skill:syncFromRepo",
 
@@ -145,6 +156,38 @@ export const IPC_CHANNELS = {
   // Skill Backup Restore
   SKILL_DELETE_ALL: "skill:deleteAll",
   SKILL_INSERT_VERSION_DIRECT: "skill:version:insertDirect",
+
+  // MCP
+  MCP_LIBRARY_GET: "mcp:library:get",
+  MCP_MARKET_LIST: "mcp:market:list",
+  MCP_MARKET_SOURCES: "mcp:market:sources",
+  MCP_MARKET_INSTALL_TEMPLATE: "mcp:market:installTemplate",
+  MCP_FETCH_REMOTE_CONTENT: "mcp:fetchRemoteContent",
+  MCP_TARGET_PRESETS: "mcp:target:presets",
+  MCP_SERVER_CREATE: "mcp:server:create",
+  MCP_SERVER_CREATE_FROM_SOURCE: "mcp:server:createFromSource",
+  MCP_SERVER_UPDATE: "mcp:server:update",
+  MCP_SERVER_DELETE: "mcp:server:delete",
+  MCP_TEMPLATE_INSTALL: "mcp:template:install",
+  MCP_PREVIEW: "mcp:preview",
+  MCP_APPLY: "mcp:apply",
+  MCP_REMOVE: "mcp:remove",
+  MCP_REMOVE_NAMES: "mcp:remove:names",
+  MCP_TARGET_STATUS: "mcp:target:status",
+  MCP_IMPORT_FILE: "mcp:importFile",
+  MCP_HEALTH_CHECK: "mcp:health:check",
+  MCP_HEALTH_CHECK_ALL: "mcp:health:checkAll",
+  MCP_ENV_IMPORT: "mcp:env:import",
+
+  // Plugins
+  PLUGIN_LIBRARY_GET: "plugin:library:get",
+  PLUGIN_MARKET_LIST: "plugin:market:list",
+  PLUGIN_MARKET_SOURCES: "plugin:market:sources",
+  PLUGIN_MARKET_PREVIEW: "plugin:market:preview",
+  PLUGIN_MARKET_INSTALL: "plugin:market:install",
+  PLUGIN_DELETE: "plugin:delete",
+  PLUGIN_DISTRIBUTE: "plugin:distribute",
+  PLUGIN_TARGET_MATRIX: "plugin:target:matrix",
 
   // Data Recovery
   DATA_CHECK_RECOVERY: "data:checkRecovery",

@@ -11,15 +11,18 @@ import {
   ChevronDownIcon,
   SparklesIcon,
   Wand2Icon,
+  ImageIcon,
   GlobeIcon,
   LogOutIcon,
 } from "lucide-react";
 import { clsx } from "clsx";
-import { UpdateStatus } from "../UpdateDialog";
+import type { UpdateStatus } from "../UpdateDialog";
 import { usePromptStore } from "../../stores/prompt.store";
 import { useSettingsStore } from "../../stores/settings.store";
 import { useFolderStore } from "../../stores/folder.store";
 import { useSkillStore } from "../../stores/skill.store";
+import { useMcpStore } from "../../stores/mcp.store";
+import { usePluginStore } from "../../stores/plugin.store";
 import {
   useState,
   useEffect,
@@ -33,13 +36,11 @@ import {
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { useUIStore } from "../../stores/ui.store";
-import { useRulesStore } from "../../stores/rules.store";
 import { collectPrivateFolderScopeIds } from "../../services/prompt-filter";
 import {
   filterVisibleScannedSkills,
   filterVisibleSkills,
 } from "../../services/skill-filter";
-import { filterRegistrySkills } from "../../services/skill-store-search";
 import {
   getRuntimeCapabilities,
   getWebContext,
@@ -57,13 +58,24 @@ const QuickAddModal = lazy(() =>
     default: module.QuickAddModal,
   })),
 );
+const ImagePromptReverseModal = lazy(() =>
+  import("../prompt/ImagePromptReverseModal").then((module) => ({
+    default: module.ImagePromptReverseModal,
+  })),
+);
 const CreateSkillModal = lazy(() =>
   import("../skill/CreateSkillModal").then((module) => ({
     default: module.CreateSkillModal,
   })),
 );
+const TopBarRulesSearch = lazy(() =>
+  import("./TopBarRulesSearch").then((module) => ({
+    default: module.TopBarRulesSearch,
+  })),
+);
 
 const OPEN_CREATE_SKILL_PROJECT_MODAL_EVENT = "open-create-skill-project-modal";
+const OPEN_CREATE_MCP_MODAL_EVENT = "open-create-mcp-modal";
 
 interface TopBarProps {
   onOpenSettings: () => void;
@@ -87,25 +99,20 @@ export function TopBar({
   // Skill store
   const skillSearchQuery = useSkillStore((state) => state.searchQuery);
   const setSkillSearchQuery = useSkillStore((state) => state.setSearchQuery);
-  const skillStoreSearchQuery = useSkillStore((state) => state.storeSearchQuery);
-  const setSkillStoreSearchQuery = useSkillStore(
-    (state) => state.setStoreSearchQuery,
-  );
   const skills = useSkillStore((state) => state.skills);
   const skillFilterType = useSkillStore((state) => state.filterType);
   const skillFilterTags = useSkillStore((state) => state.filterTags);
   const deployedSkillNames = useSkillStore((state) => state.deployedSkillNames);
   const skillStoreView = useSkillStore((state) => state.storeView);
-  const skillStoreCategory = useSkillStore((state) => state.storeCategory);
-  const registrySkills = useSkillStore((state) => state.registrySkills);
-  const selectedStoreSourceId = useSkillStore(
-    (state) => state.selectedStoreSourceId,
-  );
-  const remoteStoreEntries = useSkillStore((state) => state.remoteStoreEntries);
   const selectedProjectId = useSkillStore((state) => state.selectedProjectId);
   const projectScanState = useSkillStore((state) => state.projectScanState);
   const selectSkill = useSkillStore((state) => state.selectSkill);
-  const selectRegistrySkill = useSkillStore((state) => state.selectRegistrySkill);
+  const mcpSearchQuery = useMcpStore((state) => state.searchQuery);
+  const setMcpSearchQuery = useMcpStore((state) => state.setSearchQuery);
+  const mcpLibrary = useMcpStore((state) => state.library);
+  const mcpSelectedTab = useMcpStore((state) => state.selectedTab);
+  const pluginSearchQuery = usePluginStore((state) => state.searchQuery);
+  const setPluginSearchQuery = usePluginStore((state) => state.setSearchQuery);
 
   const isDarkMode = useSettingsStore((state) => state.isDarkMode);
   const setDarkMode = useSettingsStore((state) => state.setDarkMode);
@@ -116,14 +123,11 @@ export function TopBar({
   const folders = useFolderStore((state) => state.folders);
   const promptTypeFilter = usePromptStore((state) => state.promptTypeFilter);
   const appModule = useUIStore((state) => state.appModule);
-  const rulesSearchQuery = useRulesStore((state) => state.searchQuery);
-  const setRulesSearchQuery = useRulesStore((state) => state.setSearchQuery);
-  const ruleFiles = useRulesStore((state) => state.files);
-  const selectRule = useRulesStore((state) => state.selectRule);
   const isSidebarCollapsed = useUIStore((state) => state.isSidebarCollapsed);
   const setSidebarCollapsed = useUIStore((state) => state.setSidebarCollapsed);
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [isQuickAddModalOpen, setIsQuickAddModalOpen] = useState(false);
+  const [isImageReverseModalOpen, setIsImageReverseModalOpen] = useState(false);
   const [quickAddInitialMode, setQuickAddInitialMode] = useState<
     "analyze" | "generate"
   >("analyze");
@@ -144,34 +148,38 @@ export function TopBar({
   const runtimeCapabilities = getRuntimeCapabilities();
   const isProjectSkillView =
     appModule === "skill" && skillStoreView === "projects";
+  const isAgentSkillView = appModule === "skill" && skillStoreView === "agents";
   const isSkillStoreCatalogView =
     appModule === "skill" && skillStoreView === "store";
   const isRulesView = appModule === "rules";
+  const isMcpView = appModule === "mcp";
+  const isPluginView = appModule === "plugin";
   const isSkillView = appModule === "skill";
   const isPromptView = appModule === "prompt";
+  const showTopBarSearch = !isSkillStoreCatalogView;
+  const showCreateButton = isPromptView || isSkillView || isMcpView;
 
   // Unified search query based on mode
   const searchQuery = isSkillView
-    ? isSkillStoreCatalogView
-      ? skillStoreSearchQuery
-      : skillSearchQuery
-    : isPromptView
-      ? promptSearchQuery
-      : isRulesView
-        ? rulesSearchQuery
-        : "";
-  const deferredSkillSearchQuery = useDeferredValue(
-    isSkillStoreCatalogView ? skillStoreSearchQuery : skillSearchQuery,
-  );
+    ? skillSearchQuery
+    : isMcpView
+      ? mcpSearchQuery
+      : isPluginView
+        ? pluginSearchQuery
+        : isPromptView
+          ? promptSearchQuery
+          : "";
+  const deferredSkillSearchQuery = useDeferredValue(skillSearchQuery);
+  const deferredMcpSearchQuery = useDeferredValue(mcpSearchQuery);
   const setSearchQuery = isSkillView
-    ? isSkillStoreCatalogView
-      ? setSkillStoreSearchQuery
-      : setSkillSearchQuery
-    : isPromptView
-      ? setPromptSearchQuery
-      : isRulesView
-        ? setRulesSearchQuery
-        : () => undefined;
+    ? setSkillSearchQuery
+    : isMcpView
+      ? setMcpSearchQuery
+      : isPluginView
+        ? setPluginSearchQuery
+        : isPromptView
+          ? setPromptSearchQuery
+          : () => undefined;
 
   // Check if AI is configured
   const hasAiConfig =
@@ -292,64 +300,51 @@ export function TopBar({
     selectedProjectId,
   ]);
 
-  const storeSearchResults = useMemo(() => {
-    if (!isSkillStoreCatalogView) return [];
-
-    const sourceSkills =
-      selectedStoreSourceId === "official"
-        ? registrySkills
-        : remoteStoreEntries[selectedStoreSourceId]?.skills || [];
-
-    return filterRegistrySkills(sourceSkills, {
-      category: skillStoreCategory,
-      searchQuery: deferredSkillSearchQuery,
-    });
-  }, [
-    deferredSkillSearchQuery,
-    isSkillStoreCatalogView,
-    registrySkills,
-    remoteStoreEntries,
-    selectedStoreSourceId,
-    skillStoreCategory,
-  ]);
-
-  const ruleSearchResults = useMemo(() => {
-    if (!isRulesView) return [];
-
-    const query = rulesSearchQuery.trim().toLowerCase();
-    if (!query) {
-      return ruleFiles;
+  const mcpSearchResults = useMemo(() => {
+    if (!isMcpView || mcpSelectedTab !== "library") {
+      return [];
     }
 
-    return ruleFiles.filter((file) => {
-      const haystack = [
-        file.platformName,
-        file.platformDescription,
-        file.name,
-        file.description,
-        file.path,
-        file.projectRootPath || "",
+    const query = deferredMcpSearchQuery.trim().toLowerCase();
+    const servers = mcpLibrary?.servers ?? [];
+    if (!query) {
+      return servers;
+    }
+
+    return servers.filter((server) =>
+      [
+        server.name,
+        server.displayName,
+        server.description ?? "",
+        server.transport,
+        server.command ?? "",
+        server.url ?? "",
+        server.cwd ?? "",
+        server.source.label ?? "",
+        ...(server.args ?? []),
+        ...(server.tags ?? []),
       ]
         .join(" ")
-        .toLowerCase();
-
-      return haystack.includes(query);
-    });
-  }, [isRulesView, ruleFiles, rulesSearchQuery]);
+        .toLowerCase()
+        .includes(query),
+    );
+  }, [deferredMcpSearchQuery, isMcpView, mcpLibrary?.servers, mcpSelectedTab]);
 
   // 根据模式选择搜索结果
-  const searchResults =
-    isRulesView
-      ? ruleSearchResults
-      : isSkillView
-        ? isProjectSkillView
-          ? projectSearchResults
-          : isSkillStoreCatalogView
-            ? storeSearchResults
-            : skillSearchResults
-      : promptSearchResults;
+  const searchResults = isSkillView
+    ? isProjectSkillView
+      ? projectSearchResults
+      : isSkillStoreCatalogView
+        ? []
+        : skillSearchResults
+    : isMcpView
+      ? mcpSearchResults
+      : isPromptView
+        ? promptSearchResults
+        : [];
   const searchResultCount = searchResults.length;
-  const showSearchNavigation = !isSkillView && !isProjectSkillView;
+  const showSearchNavigation = isPromptView;
+  const showSearchResultCount = !isAgentSkillView && !isPluginView;
 
   const updateCreateMenuPosition = useCallback(() => {
     if (!createMenuRef.current) {
@@ -381,21 +376,9 @@ export function TopBar({
         if (isProjectSkillView) {
           return;
         }
-        if (isSkillStoreCatalogView) {
-          const registryResults = storeSearchResults;
-          if (registryResults[newIndex]) {
-            selectRegistrySkill(registryResults[newIndex].source_id);
-          }
-          return;
-        }
         const skillResults = skillSearchResults;
         if (skillResults[newIndex]) {
           selectSkill(skillResults[newIndex].id);
-        }
-      } else if (isRulesView) {
-        const ruleResults = ruleSearchResults;
-        if (ruleResults[newIndex]) {
-          void selectRule(ruleResults[newIndex].id);
         }
       } else {
         const promptResults = promptSearchResults;
@@ -405,21 +388,15 @@ export function TopBar({
       }
     },
     [
-        searchResultCount,
-        currentResultIndex,
-        isRulesView,
-        isProjectSkillView,
-        isSkillStoreCatalogView,
-        isSkillView,
-        selectRule,
-        selectPrompt,
-        selectRegistrySkill,
-        selectSkill,
-        ruleSearchResults,
-        storeSearchResults,
-        skillSearchResults,
-        promptSearchResults,
-      ],
+      searchResultCount,
+      currentResultIndex,
+      isProjectSkillView,
+      isSkillView,
+      selectPrompt,
+      selectSkill,
+      skillSearchResults,
+      promptSearchResults,
+    ],
   );
 
   // 当搜索查询变化时重置索引。
@@ -427,16 +404,6 @@ export function TopBar({
   useEffect(() => {
     setCurrentResultIndex(0);
     if (searchQuery.trim().length === 0) {
-      if (isRulesView && ruleSearchResults.length > 0) {
-        void selectRule(ruleSearchResults[0].id);
-      }
-      return;
-    }
-
-    if (isRulesView) {
-      if (ruleSearchResults.length > 0) {
-        void selectRule(ruleSearchResults[0].id);
-      }
       return;
     }
 
@@ -448,16 +415,11 @@ export function TopBar({
       selectPrompt(promptSearchResults[0].id);
     }
   }, [
-    isRulesView,
     isProjectSkillView,
     isSkillView,
     promptSearchResults,
-    ruleSearchResults,
     searchQuery,
-    selectRule,
     selectPrompt,
-    selectSkill,
-    skillSearchResults,
   ]);
 
   // 处理键盘事件
@@ -482,16 +444,11 @@ export function TopBar({
       }
       // Enter 确认选择当前结果
       if (isSkillView) {
-        if (isSkillStoreCatalogView) {
-          if (storeSearchResults[currentResultIndex]) {
-            selectRegistrySkill(storeSearchResults[currentResultIndex].source_id);
-          }
-        } else if (skillSearchResults[currentResultIndex]) {
+        if (
+          !isSkillStoreCatalogView &&
+          skillSearchResults[currentResultIndex]
+        ) {
           selectSkill(skillSearchResults[currentResultIndex].id);
-        }
-      } else if (isRulesView) {
-        if (ruleSearchResults[currentResultIndex]) {
-          void selectRule(ruleSearchResults[currentResultIndex].id);
         }
       } else {
         if (promptSearchResults[currentResultIndex]) {
@@ -520,38 +477,43 @@ export function TopBar({
     };
   }, []);
 
-  // Click outside to close create menu
   useEffect(() => {
-    function handleClickOutside(event: MouseEvent) {
-      const target = event.target as Node;
-      const clickedTrigger = createMenuRef.current?.contains(target) ?? false;
-      const clickedDropdown =
-        createMenuDropdownRef.current?.contains(target) ?? false;
-
-      if (
-        !clickedTrigger &&
-        !clickedDropdown
-      ) {
-        setIsCreateMenuOpen(false);
-      }
-    }
-
-    // Listen for open-create-skill-modal event
     function handleOpenSkillModal() {
       setIsCreateSkillModalOpen(true);
     }
 
-    document.addEventListener("mousedown", handleClickOutside);
     document.addEventListener("open-create-skill-modal", handleOpenSkillModal);
 
     return () => {
-      document.removeEventListener("mousedown", handleClickOutside);
       document.removeEventListener(
         "open-create-skill-modal",
         handleOpenSkillModal,
       );
     };
   }, []);
+
+  // Click outside to close create menu
+  useEffect(() => {
+    if (!isCreateMenuOpen) {
+      return;
+    }
+
+    function handleClickOutside(event: MouseEvent) {
+      const target = event.target as Node;
+      const clickedTrigger = createMenuRef.current?.contains(target) ?? false;
+      const clickedDropdown =
+        createMenuDropdownRef.current?.contains(target) ?? false;
+
+      if (!clickedTrigger && !clickedDropdown) {
+        setIsCreateMenuOpen(false);
+      }
+    }
+
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+    };
+  }, [isCreateMenuOpen]);
 
   useEffect(() => {
     if (!isCreateMenuOpen) {
@@ -628,6 +590,14 @@ export function TopBar({
     setDarkMode(!isDarkMode);
   };
 
+  const updateVersion =
+    updateAvailable?.status === "available"
+      ? updateAvailable.info?.version?.trim()
+      : "";
+  const updateButtonLabel = updateVersion
+    ? t("settings.newVersion", { version: updateVersion })
+    : t("settings.updateAvailable");
+
   return (
     <>
       <header
@@ -666,29 +636,46 @@ export function TopBar({
                   : t("common.collapse", "Collapse")
               }
             >
-              <PanelLeftIcon className="h-4 w-4" />
+              <PanelLeftIcon aria-hidden="true" className="h-4 w-4" />
             </button>
           )}
         </div>
 
         {/* 搜索框 - 居中，带清除按钮、结果计数和导航 */}
         <div className="flex-1 flex justify-center px-3">
-          <div className="w-full max-w-lg relative flex items-center">
-            <div className="app-wallpaper-search absolute inset-0 rounded-lg border pointer-events-none" />
-            <SearchIcon className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none z-10" />
-            <input
-              ref={searchInputRef}
-              type="text"
+          {isRulesView ? (
+            <Suspense
+              fallback={
+                <div className="h-9 w-full max-w-lg rounded-lg border border-transparent app-wallpaper-search" />
+              }
+            >
+              <TopBarRulesSearch searchInputRef={searchInputRef} />
+            </Suspense>
+          ) : showTopBarSearch ? (
+            <div className="w-full max-w-lg relative flex items-center">
+              <div className="app-wallpaper-search absolute inset-0 rounded-lg border pointer-events-none" />
+              <SearchIcon className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none z-10" />
+              <input
+                ref={searchInputRef}
+                type="text"
                 placeholder={
                   appModule === "skill"
                     ? isProjectSkillView
-                      ? t("header.searchProjectSkills", "Search project skills...")
-                      : isSkillStoreCatalogView
-                        ? t("skill.searchStore", "Search skills...")
-                      : t("header.searchSkill", "Search skills...")
-                    : isRulesView
-                      ? t("rules.searchPlaceholder", "Search rule files...")
-                      : t("header.search")
+                      ? t(
+                          "header.searchProjectSkills",
+                          "Search project skills...",
+                        )
+                      : isAgentSkillView
+                        ? t(
+                            "header.searchAgentSkills",
+                            "Search agent skills...",
+                          )
+                        : t("header.searchSkill", "Search skills...")
+                    : appModule === "mcp"
+                      ? t("header.searchMcp", "Search MCP...")
+                      : appModule === "plugin"
+                        ? t("plugin.searchPlaceholder", "Search Plugins")
+                        : t("header.search")
                 }
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
@@ -697,53 +684,74 @@ export function TopBar({
                 className="relative z-10 w-full h-9 pl-9 pr-32 rounded-lg border border-transparent bg-transparent text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/30 transition-all"
                 style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
               />
-            {/* 右侧控件：结果计数 + 导航按钮 + 清除按钮 */}
-            {searchQuery && (
-              <div
-                className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1"
-                style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
-              >
-                {/* 结果计数 */}
-                <span className="text-xs text-muted-foreground tabular-nums px-1">
-                  {searchResultCount > 0
-                    ? showSearchNavigation
-                      ? `${currentResultIndex + 1}/${searchResultCount}`
-                      : t("header.resultsCount", {
-                          count: searchResultCount,
-                          defaultValue: `${searchResultCount} results`,
-                        })
-                    : t("header.noResults", "No results")}
-                </span>
-                {/* 上下导航按钮 */}
-                {showSearchNavigation && searchResultCount > 1 && (
-                  <>
-                    <button
-                      onClick={() => navigateResult("prev")}
-                      className="p-1 rounded hover:bg-accent/60 transition-colors"
-                      title={t("header.prevResult", "上一个 (Shift+Tab)")}
-                    >
-                      <ChevronUpIcon className="w-3.5 h-3.5 text-muted-foreground" />
-                    </button>
-                    <button
-                      onClick={() => navigateResult("next")}
-                      className="p-1 rounded hover:bg-accent/60 transition-colors"
-                      title={t("header.nextResult", "下一个 (Tab)")}
-                    >
-                      <ChevronDownIcon className="w-3.5 h-3.5 text-muted-foreground" />
-                    </button>
-                  </>
-                )}
-                {/* 清除按钮 */}
-                <button
-                  onClick={() => setSearchQuery("")}
-                    className="p-1 rounded hover:bg-accent/60 transition-colors"
-                  title={t("header.clearSearch", "清除搜索")}
+              {/* 右侧控件：结果计数 + 导航按钮 + 清除按钮 */}
+              {searchQuery && (
+                <div
+                  className="absolute right-2 top-1/2 z-20 -translate-y-1/2 flex items-center gap-1"
+                  style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
                 >
-                  <XIcon className="w-3.5 h-3.5 text-muted-foreground" />
-                </button>
-              </div>
-            )}
-          </div>
+                  {/* 结果计数 */}
+                  {showSearchResultCount ? (
+                    <span className="text-xs text-muted-foreground tabular-nums px-1">
+                      {searchResultCount > 0
+                        ? showSearchNavigation
+                          ? `${currentResultIndex + 1}/${searchResultCount}`
+                          : t("header.resultsCount", {
+                              count: searchResultCount,
+                              defaultValue: `${searchResultCount} results`,
+                            })
+                        : t("header.noResults", "No results")}
+                    </span>
+                  ) : null}
+                  {/* 上下导航按钮 */}
+                  {showSearchNavigation && searchResultCount > 1 && (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => navigateResult("prev")}
+                        className="p-1 rounded hover:bg-accent/60 transition-colors"
+                        aria-label={t(
+                          "header.prevResult",
+                          "上一个 (Shift+Tab)",
+                        )}
+                        title={t("header.prevResult", "上一个 (Shift+Tab)")}
+                      >
+                        <ChevronUpIcon
+                          aria-hidden="true"
+                          className="w-3.5 h-3.5 text-muted-foreground"
+                        />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => navigateResult("next")}
+                        className="p-1 rounded hover:bg-accent/60 transition-colors"
+                        aria-label={t("header.nextResult", "下一个 (Tab)")}
+                        title={t("header.nextResult", "下一个 (Tab)")}
+                      >
+                        <ChevronDownIcon
+                          aria-hidden="true"
+                          className="w-3.5 h-3.5 text-muted-foreground"
+                        />
+                      </button>
+                    </>
+                  )}
+                  {/* 清除按钮 */}
+                  <button
+                    type="button"
+                    onClick={() => setSearchQuery("")}
+                    className="p-1 rounded hover:bg-accent/60 transition-colors"
+                    aria-label={t("header.clearSearch", "清除搜索")}
+                    title={t("header.clearSearch", "清除搜索")}
+                  >
+                    <XIcon
+                      aria-hidden="true"
+                      className="w-3.5 h-3.5 text-muted-foreground"
+                    />
+                  </button>
+                </div>
+              )}
+            </div>
+          ) : null}
         </div>
 
         {/* 右侧操作按钮 - 只有按钮本身不可拖动 */}
@@ -752,32 +760,31 @@ export function TopBar({
           {runtimeCapabilities.appUpdate &&
             updateAvailable &&
             updateAvailable.status === "available" && (
-            <>
-              <button
-                onClick={onShowUpdateDialog}
-                className="flex items-center gap-1.5 h-8 px-3 rounded-lg border border-dashed border-primary/50 bg-primary/10 text-primary text-sm font-medium hover:bg-primary/20 transition-colors"
-                style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
-                title={t("settings.updateAvailable")}
-              >
-                <DownloadIcon className="w-4 h-4" />
-                <span className="hidden sm:inline">
-                  {t("settings.newVersion", {
-                    version: updateAvailable.info?.version,
-                  })}
-                </span>
-              </button>
-              <div className="w-px h-5 bg-border mx-1" />
-            </>
-          )}
+              <>
+                <button
+                  type="button"
+                  onClick={onShowUpdateDialog}
+                  className="flex items-center gap-1.5 h-8 px-3 rounded-lg border border-dashed border-primary/50 bg-primary/10 text-primary text-sm font-medium hover:bg-primary/20 transition-colors"
+                  style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
+                  aria-label={t("settings.updateAvailable")}
+                  title={t("settings.updateAvailable")}
+                >
+                  <DownloadIcon aria-hidden="true" className="w-4 h-4" />
+                  <span className="hidden sm:inline">{updateButtonLabel}</span>
+                </button>
+                <div className="w-px h-5 bg-border mx-1" />
+              </>
+            )}
 
-          {/* Split Button for New Prompt / New Skill */}
-          {!isRulesView && (
+          {/* Split Button for New Prompt / New Skill / New MCP */}
+          {showCreateButton && (
             <div
               ref={createMenuRef}
               className="flex items-center rounded-lg bg-primary text-primary-foreground shadow-sm hover:bg-primary/90 transition-all ml-4 relative h-8"
               style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
             >
               <button
+                type="button"
                 onClick={async () => {
                   if (appModule === "skill") {
                     if (isProjectSkillView) {
@@ -787,6 +794,10 @@ export function TopBar({
                     } else {
                       setIsCreateSkillModalOpen(true);
                     }
+                  } else if (appModule === "mcp") {
+                    document.dispatchEvent(
+                      new CustomEvent(OPEN_CREATE_MCP_MODAL_EVENT),
+                    );
                   } else {
                     const mode = useSettingsStore.getState().creationMode;
                     if (mode === "manual") setIsCreateModalOpen(true);
@@ -804,149 +815,207 @@ export function TopBar({
               >
                 {appModule === "skill" ? (
                   isProjectSkillView ? (
-                    <FolderPlusIcon className="w-4 h-4" />
+                    <FolderPlusIcon aria-hidden="true" className="w-4 h-4" />
                   ) : (
-                    <PlusIcon className="w-4 h-4" />
+                    <PlusIcon aria-hidden="true" className="w-4 h-4" />
                   )
+                ) : appModule === "mcp" ? (
+                  <PlusIcon aria-hidden="true" className="w-4 h-4" />
                 ) : creationMode === "manual" ? (
-                  <PlusIcon className="w-4 h-4" />
+                  <PlusIcon aria-hidden="true" className="w-4 h-4" />
                 ) : (
-                  <SparklesIcon className="w-4 h-4" />
+                  <SparklesIcon aria-hidden="true" className="w-4 h-4" />
                 )}
                 <span>
                   {appModule === "skill"
                     ? isProjectSkillView
                       ? t("skill.addProject", "Add Project")
                       : t("header.new")
-                    : creationMode === "manual"
+                    : appModule === "mcp"
                       ? t("header.new")
-                      : t("quickAdd.title")}
+                      : creationMode === "manual"
+                        ? t("header.new")
+                        : t("quickAdd.title")}
                 </span>
               </button>
 
               {appModule === "prompt" && (
-              <>
-                <button
-                  onClick={() => {
-                    if (!isCreateMenuOpen) {
-                      updateCreateMenuPosition();
-                    }
-                    setIsCreateMenuOpen(!isCreateMenuOpen);
-                  }}
-                  aria-haspopup="menu"
-                  aria-expanded={isCreateMenuOpen}
-                  className="flex items-center justify-center h-full px-1.5 hover:bg-black/10 transition-colors rounded-r-lg"
-                >
-                  <ChevronDownIcon className="w-3.5 h-3.5" />
-                </button>
+                <>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (!isCreateMenuOpen) {
+                        updateCreateMenuPosition();
+                      }
+                      setIsCreateMenuOpen(!isCreateMenuOpen);
+                    }}
+                    aria-haspopup="menu"
+                    aria-expanded={isCreateMenuOpen}
+                    aria-label={t("header.createMenu", "Creation mode")}
+                    title={t("header.createMenu", "Creation mode")}
+                    className="flex items-center justify-center h-full px-1.5 hover:bg-black/10 transition-colors rounded-r-lg"
+                  >
+                    <ChevronDownIcon
+                      aria-hidden="true"
+                      className="w-3.5 h-3.5"
+                    />
+                  </button>
 
-                {isCreateMenuOpen &&
-                  typeof document !== "undefined" &&
-                  createPortal(
-                    <div
-                      ref={createMenuDropdownRef}
-                      role="menu"
-                      className="fixed mt-1 w-48 rounded-lg border border-border app-wallpaper-panel-strong p-1 z-[9999] animate-in fade-in zoom-in-95 duration-instant"
-                      style={{
-                        top: createMenuPosition.top,
-                        right: createMenuPosition.right,
-                        WebkitAppRegion: "no-drag",
-                      } as React.CSSProperties}
-                    >
-                      <button
-                        onClick={() => {
-                          useSettingsStore.getState().setCreationMode("manual");
-                          setIsCreateMenuOpen(false);
-                        }}
-                        className={clsx(
-                          "flex items-center gap-2 w-full px-3 py-2 text-sm text-foreground hover:bg-accent text-left transition-colors rounded-md",
-                          creationMode === "manual" && "bg-accent",
-                        )}
+                  {isCreateMenuOpen &&
+                    typeof document !== "undefined" &&
+                    createPortal(
+                      <div
+                        ref={createMenuDropdownRef}
+                        role="menu"
+                        className="fixed mt-1 w-48 rounded-lg border border-border app-wallpaper-panel-strong p-1 z-[9999] animate-in fade-in zoom-in-95 duration-instant"
+                        style={
+                          {
+                            top: createMenuPosition.top,
+                            right: createMenuPosition.right,
+                            WebkitAppRegion: "no-drag",
+                          } as React.CSSProperties
+                        }
                       >
-                        <PlusIcon className="w-4 h-4 text-muted-foreground" />
-                        <div className="flex flex-col items-start gap-0.5">
-                          <span className="font-medium">{t("header.new")}</span>
-                          <span className="text-[10px] text-muted-foreground leading-none">
-                            {t("quickAdd.manualAddDesc")}
-                          </span>
-                        </div>
-                        {creationMode === "manual" && (
-                          <div className="ml-auto w-1.5 h-1.5 rounded-full bg-primary" />
-                        )}
-                      </button>
-                      <div className="h-px bg-border my-1 mx-2 opacity-50" />
-                      <button
-                        onClick={() => {
-                          useSettingsStore.getState().setCreationMode("quick");
-                          setIsCreateMenuOpen(false);
-                        }}
-                        className={clsx(
-                          "flex items-center gap-2 w-full px-3 py-2 text-sm text-foreground hover:bg-accent text-left transition-colors rounded-md",
-                          creationMode === "quick" && "bg-accent",
-                        )}
-                      >
-                        <SparklesIcon className="w-4 h-4 text-primary" />
-                        <div className="flex flex-col items-start gap-0.5">
-                          <span className="font-medium">
-                            {t("quickAdd.title")}
-                          </span>
-                          <span className="text-[10px] text-muted-foreground leading-none">
-                            {t("quickAdd.desc")}
-                          </span>
-                        </div>
-                        {creationMode === "quick" && (
-                          <div className="ml-auto w-1.5 h-1.5 rounded-full bg-primary" />
-                        )}
-                      </button>
-                      <div className="h-px bg-border my-1 mx-2 opacity-50" />
-                      <button
-                        onClick={() => {
-                          useSettingsStore.getState().setCreationMode("quick");
-                          setQuickAddInitialMode("generate");
-                          setIsQuickAddModalOpen(true);
-                          setIsCreateMenuOpen(false);
-                        }}
-                        className="flex items-center gap-2 w-full px-3 py-2 text-sm text-foreground hover:bg-accent text-left transition-colors rounded-md"
-                      >
-                        <Wand2Icon className="w-4 h-4 text-primary" />
-                        <div className="flex flex-col items-start gap-0.5">
-                          <span className="font-medium">
-                            {t("quickAdd.generateEntry")}
-                          </span>
-                          <span className="text-[10px] text-muted-foreground leading-none">
-                            {t("quickAdd.generateEntryDesc")}
-                          </span>
-                        </div>
-                      </button>
-                    </div>,
-                    document.body,
-                  )}
-              </>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            useSettingsStore
+                              .getState()
+                              .setCreationMode("manual");
+                            setIsCreateMenuOpen(false);
+                          }}
+                          className={clsx(
+                            "flex items-center gap-2 w-full px-3 py-2 text-sm text-foreground hover:bg-accent text-left transition-colors rounded-md",
+                            creationMode === "manual" && "bg-accent",
+                          )}
+                        >
+                          <PlusIcon
+                            aria-hidden="true"
+                            className="w-4 h-4 text-muted-foreground"
+                          />
+                          <div className="flex flex-col items-start gap-0.5">
+                            <span className="font-medium">
+                              {t("header.new")}
+                            </span>
+                            <span className="text-[10px] text-muted-foreground leading-none">
+                              {t("quickAdd.manualAddDesc")}
+                            </span>
+                          </div>
+                          {creationMode === "manual" && (
+                            <div className="ml-auto w-1.5 h-1.5 rounded-full bg-primary" />
+                          )}
+                        </button>
+                        <div className="h-px bg-border my-1 mx-2 opacity-50" />
+                        <button
+                          type="button"
+                          onClick={() => {
+                            useSettingsStore
+                              .getState()
+                              .setCreationMode("quick");
+                            setIsCreateMenuOpen(false);
+                          }}
+                          className={clsx(
+                            "flex items-center gap-2 w-full px-3 py-2 text-sm text-foreground hover:bg-accent text-left transition-colors rounded-md",
+                            creationMode === "quick" && "bg-accent",
+                          )}
+                        >
+                          <SparklesIcon
+                            aria-hidden="true"
+                            className="w-4 h-4 text-primary"
+                          />
+                          <div className="flex flex-col items-start gap-0.5">
+                            <span className="font-medium">
+                              {t("quickAdd.title")}
+                            </span>
+                            <span className="text-[10px] text-muted-foreground leading-none">
+                              {t("quickAdd.desc")}
+                            </span>
+                          </div>
+                          {creationMode === "quick" && (
+                            <div className="ml-auto w-1.5 h-1.5 rounded-full bg-primary" />
+                          )}
+                        </button>
+                        <div className="h-px bg-border my-1 mx-2 opacity-50" />
+                        <button
+                          type="button"
+                          onClick={() => {
+                            useSettingsStore
+                              .getState()
+                              .setCreationMode("quick");
+                            setQuickAddInitialMode("generate");
+                            setIsQuickAddModalOpen(true);
+                            setIsCreateMenuOpen(false);
+                          }}
+                          className="flex items-center gap-2 w-full px-3 py-2 text-sm text-foreground hover:bg-accent text-left transition-colors rounded-md"
+                        >
+                          <Wand2Icon
+                            aria-hidden="true"
+                            className="w-4 h-4 text-primary"
+                          />
+                          <div className="flex flex-col items-start gap-0.5">
+                            <span className="font-medium">
+                              {t("quickAdd.generateEntry")}
+                            </span>
+                            <span className="text-[10px] text-muted-foreground leading-none">
+                              {t("quickAdd.generateEntryDesc")}
+                            </span>
+                          </div>
+                        </button>
+                        <div className="h-px bg-border my-1 mx-2 opacity-50" />
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setIsImageReverseModalOpen(true);
+                            setIsCreateMenuOpen(false);
+                          }}
+                          className="flex items-center gap-2 w-full px-3 py-2 text-sm text-foreground hover:bg-accent text-left transition-colors rounded-md"
+                        >
+                          <ImageIcon
+                            aria-hidden="true"
+                            className="w-4 h-4 text-primary"
+                          />
+                          <div className="flex flex-col items-start gap-0.5">
+                            <span className="font-medium">
+                              {t("imageReverse.title")}
+                            </span>
+                            <span className="text-[10px] text-muted-foreground leading-none">
+                              {t("imageReverse.entryDesc")}
+                            </span>
+                          </div>
+                        </button>
+                      </div>,
+                      document.body,
+                    )}
+                </>
               )}
             </div>
           )}
 
           {/* 主题切换 */}
           <button
+            type="button"
             onClick={toggleTheme}
+            aria-label={t("settings.toggleTheme", "Toggle theme")}
+            title={t("settings.toggleTheme", "Toggle theme")}
             className="p-2 rounded-lg text-muted-foreground hover:text-foreground hover:bg-accent/60 transition-colors"
             style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
           >
             {isDarkMode ? (
-              <SunIcon className="w-4 h-4" />
+              <SunIcon aria-hidden="true" className="w-4 h-4" />
             ) : (
-              <MoonIcon className="w-4 h-4" />
+              <MoonIcon aria-hidden="true" className="w-4 h-4" />
             )}
           </button>
 
           {webRuntime && (
             <button
+              type="button"
               onClick={() => void logoutWebSession()}
               className="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-2 text-sm text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground"
               style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
               title={t("settings.signOut")}
             >
-              <LogOutIcon className="w-4 h-4" />
+              <LogOutIcon aria-hidden="true" className="w-4 h-4" />
               <span className="hidden sm:inline">{t("settings.signOut")}</span>
             </button>
           )}
@@ -970,6 +1039,13 @@ export function TopBar({
           onCreate={handleCreatePrompt}
           defaultPromptType={promptTypeFilter === "image" ? "image" : "text"}
           initialMode={quickAddInitialMode}
+        />
+
+        <ImagePromptReverseModal
+          isOpen={isImageReverseModalOpen}
+          onClose={() => setIsImageReverseModalOpen(false)}
+          onCreate={handleCreatePrompt}
+          defaultFolderId={selectedFolderId || undefined}
         />
 
         {/* 新建 Skill 弹窗 */}

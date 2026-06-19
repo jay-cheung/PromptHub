@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { closeDatabase } from "@prompthub/core";
 import { createCliSkillService, runCli } from "@prompthub/core";
+import type { SkillSafetyReport } from "@prompthub/shared/types";
 
 function makeTempRoot(tempDirs: string[]): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "prompthub-cli-app-"));
@@ -15,6 +16,26 @@ function makeTempRoot(tempDirs: string[]): string {
 
 function withDataDir(rootDir: string): string[] {
   return ["--data-dir", path.join(rootDir, "user-data")];
+}
+
+async function withTempHome<T>(
+  rootDir: string,
+  run: (homeDir: string) => Promise<T>,
+): Promise<T> {
+  const originalHome = process.env.HOME;
+  const homeDir = path.join(rootDir, "home");
+  fs.mkdirSync(homeDir, { recursive: true });
+
+  try {
+    process.env.HOME = homeDir;
+    return await run(homeDir);
+  } finally {
+    if (originalHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = originalHome;
+    }
+  }
 }
 
 async function execCli(
@@ -36,6 +57,17 @@ async function execCli(
 
   const joinedStdout = stdout.join("\n");
   const joinedStderr = stderr.join("\n");
+  const parseMaybeJson = (text: string) => {
+    const trimmed = text.trim();
+    if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) {
+      return undefined;
+    }
+    try {
+      return JSON.parse(text);
+    } catch {
+      return undefined;
+    }
+  };
 
   return {
     exitCode,
@@ -43,14 +75,8 @@ async function execCli(
     stderr,
     joinedStdout,
     joinedStderr,
-    errorJson:
-      joinedStderr.trim().startsWith("{") || joinedStderr.trim().startsWith("[")
-        ? JSON.parse(joinedStderr)
-        : undefined,
-    json:
-      joinedStdout.trim().startsWith("{") || joinedStdout.trim().startsWith("[")
-        ? JSON.parse(joinedStdout)
-        : undefined,
+    errorJson: parseMaybeJson(joinedStderr),
+    json: parseMaybeJson(joinedStdout),
   };
 }
 
@@ -83,7 +109,7 @@ describe("standalone cli wiring", () => {
     const result = await execCli(["--version"]);
 
     expect(result.exitCode).toBe(0);
-    expect(result.joinedStdout.trim()).toMatch(/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/);
+    expect(result.joinedStdout.trim()).toBe("0.5.8-beta.3");
     expect(result.stderr).toEqual([]);
   });
 
@@ -113,6 +139,193 @@ describe("standalone cli wiring", () => {
     expect(listRes.exitCode).toBe(0);
     expect(listRes.json).toHaveLength(1);
     expect(listRes.json[0].title).toBe("CLI Prompt");
+  });
+
+  it("supports MCP market, import, env import, and health check in the shared library", async () => {
+    const root = makeTempRoot(tempDirs);
+    const mcpConfigPath = path.join(root, "mcp.json");
+    const envPath = path.join(root, ".env");
+    fs.writeFileSync(
+      mcpConfigPath,
+      JSON.stringify({
+        mcpServers: {
+          docs: {
+            command: process.execPath,
+            args: ["server.js", "${API_TOKEN}"],
+            env: { API_TOKEN: "" },
+          },
+        },
+      }),
+      "utf8",
+    );
+    fs.writeFileSync(
+      envPath,
+      ["API_TOKEN=token-from-env", "UNRELATED_SECRET=skip-me"].join("\n"),
+      "utf8",
+    );
+
+    const marketRes = await execCli([...withDataDir(root), "mcp", "market"]);
+    expect(marketRes.exitCode).toBe(0);
+    expect(
+      marketRes.json.some((item: { id: string }) => item.id === "context7"),
+    ).toBe(true);
+
+    const importRes = await execCli([
+      ...withDataDir(root),
+      "mcp",
+      "import",
+      mcpConfigPath,
+    ]);
+    expect(importRes.exitCode).toBe(0);
+    expect(importRes.json.imported[0].name).toBe("docs");
+
+    const checkBefore = await execCli([
+      ...withDataDir(root),
+      "mcp",
+      "check",
+      "docs",
+    ]);
+    expect(checkBefore.exitCode).toBe(0);
+    expect(checkBefore.json.status).toBe("error");
+    expect(
+      checkBefore.json.issues.some(
+        (issue: { code: string; field?: string }) =>
+          issue.code === "MISSING_ENV" && issue.field === "API_TOKEN",
+      ),
+    ).toBe(true);
+
+    const envImportRes = await execCli([
+      ...withDataDir(root),
+      "mcp",
+      "env-import",
+      "docs",
+      "--file",
+      envPath,
+    ]);
+    expect(envImportRes.exitCode).toBe(0);
+    expect(envImportRes.json.importedKeys).toEqual(["API_TOKEN"]);
+    expect(envImportRes.json.server.env).toEqual({
+      API_TOKEN: "token-from-env",
+    });
+
+    const listRes = await execCli([...withDataDir(root), "mcp", "list"]);
+    expect(listRes.exitCode).toBe(0);
+    expect(listRes.json[0]).toMatchObject({
+      name: "docs",
+      env: { API_TOKEN: "token-from-env" },
+    });
+
+    const exportRes = await execCli([
+      ...withDataDir(root),
+      "mcp",
+      "export",
+      "--target",
+      "codex",
+      "--servers",
+      "docs",
+    ]);
+    expect(exportRes.exitCode).toBe(0);
+    expect(exportRes.joinedStdout).toContain("[mcp_servers.docs]");
+    expect(exportRes.joinedStdout).toContain(
+      `command = ${JSON.stringify(process.execPath)}`,
+    );
+
+    const disableRes = await execCli([
+      ...withDataDir(root),
+      "mcp",
+      "disable",
+      "docs",
+    ]);
+    expect(disableRes.exitCode).toBe(0);
+    expect(disableRes.json.enabled).toBe(false);
+
+    const enableRes = await execCli([
+      ...withDataDir(root),
+      "mcp",
+      "enable",
+      "docs",
+    ]);
+    expect(enableRes.exitCode).toBe(0);
+    expect(enableRes.json.enabled).toBe(true);
+
+    const jsonTargetPath = path.join(root, "target-mcp.json");
+    fs.writeFileSync(
+      jsonTargetPath,
+      JSON.stringify({
+        mcpServers: {
+          docs: { command: "node", args: ["external.js"] },
+        },
+      }),
+      "utf8",
+    );
+    const conflictRes = await execCli([
+      ...withDataDir(root),
+      "mcp",
+      "apply",
+      "--target",
+      "claude",
+      "--path",
+      jsonTargetPath,
+      "--servers",
+      "docs",
+    ]);
+    expect(conflictRes.exitCode).toBe(4);
+    expect(conflictRes.errorJson.error.code).toBe("TARGET_CONFLICT");
+    expect(
+      JSON.parse(fs.readFileSync(jsonTargetPath, "utf8")).mcpServers.docs
+        .command,
+    ).toBe("node");
+
+    const forcedJsonApplyRes = await execCli([
+      ...withDataDir(root),
+      "mcp",
+      "apply",
+      "--target",
+      "claude",
+      "--path",
+      jsonTargetPath,
+      "--servers",
+      "docs",
+      "--force",
+    ]);
+    expect(forcedJsonApplyRes.exitCode).toBe(0);
+    expect(forcedJsonApplyRes.json.overwrittenServerNames).toEqual(["docs"]);
+    expect(
+      JSON.parse(fs.readFileSync(jsonTargetPath, "utf8")).mcpServers.docs
+        .command,
+    ).toBe(process.execPath);
+
+    const targetPath = path.join(root, "codex-config.toml");
+    const applyRes = await execCli([
+      ...withDataDir(root),
+      "mcp",
+      "apply",
+      "--target",
+      "codex",
+      "--path",
+      targetPath,
+      "--servers",
+      "docs",
+    ]);
+    expect(applyRes.exitCode).toBe(0);
+    expect(fs.readFileSync(targetPath, "utf8")).toContain("[mcp_servers.docs]");
+
+    const removeRes = await execCli([
+      ...withDataDir(root),
+      "mcp",
+      "remove",
+      "--target",
+      "codex",
+      "--path",
+      targetPath,
+      "--servers",
+      "docs",
+    ]);
+    expect(removeRes.exitCode).toBe(0);
+    expect(removeRes.json.removedServerNames).toEqual(["docs"]);
+    expect(fs.readFileSync(targetPath, "utf8")).not.toContain(
+      "[mcp_servers.docs]",
+    );
   });
 
   it("normalizes CSV tags by trimming whitespace and dropping empty items", async () => {
@@ -592,7 +805,11 @@ describe("standalone cli wiring", () => {
     expect(deleteTagRes.exitCode).toBe(0);
     expect(deleteTagRes.json.deleted).toBe(true);
 
-    const promptListRes = await execCli([...withDataDir(root), "prompt", "list"]);
+    const promptListRes = await execCli([
+      ...withDataDir(root),
+      "prompt",
+      "list",
+    ]);
     expect(promptListRes.exitCode).toBe(0);
     expect(promptListRes.json[0].tags).toEqual(["gamma"]);
   });
@@ -715,10 +932,13 @@ describe("standalone cli wiring", () => {
 
     const stdout: string[] = [];
     const stderr: string[] = [];
-    const exitCode = await runCli([...withDataDir(root), "skill", "install", skillJsonPath], {
-      stdout: (message: string) => stdout.push(message),
-      stderr: (message: string) => stderr.push(message),
-    });
+    const exitCode = await runCli(
+      [...withDataDir(root), "skill", "install", skillJsonPath],
+      {
+        stdout: (message: string) => stdout.push(message),
+        stderr: (message: string) => stderr.push(message),
+      },
+    );
 
     expect(exitCode).toBe(0);
     expect(stderr).toEqual([]);
@@ -765,24 +985,30 @@ describe("standalone cli wiring", () => {
     const root = makeTempRoot(tempDirs);
     const stdout: string[] = [];
     const stderr: string[] = [];
-    const fetchImpl = vi.fn(async () =>
-      new Response(
-        [
-          "---",
-          "name: remote-skill",
-          "description: Remote install",
-          "version: 0.9.0",
-          "author: Remote",
-          "---",
-          "",
-          "# Remote Skill",
-        ].join("\n"),
-        { status: 200 },
-      ),
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(
+          [
+            "---",
+            "name: remote-skill",
+            "description: Remote install",
+            "version: 0.9.0",
+            "author: Remote",
+            "---",
+            "",
+            "# Remote Skill",
+          ].join("\n"),
+          { status: 200 },
+        ),
     );
 
     const exitCode = await runCli(
-      [...withDataDir(root), "skill", "install", "https://example.com/skill.md"],
+      [
+        ...withDataDir(root),
+        "skill",
+        "install",
+        "https://example.com/skill.md",
+      ],
       {
         stdout: (message: string) => stdout.push(message),
         stderr: (message: string) => stderr.push(message),
@@ -821,7 +1047,12 @@ describe("standalone cli wiring", () => {
     });
 
     const exitCode = await runCli(
-      [...withDataDir(root), "skill", "install", "https://github.com/acme/github-skill"],
+      [
+        ...withDataDir(root),
+        "skill",
+        "install",
+        "https://github.com/acme/github-skill",
+      ],
       {
         stdout: (message: string) => stdout.push(message),
         stderr: (message: string) => stderr.push(message),
@@ -858,12 +1089,25 @@ describe("standalone cli wiring", () => {
         ].join("\n"),
         "utf8",
       );
-      fs.writeFileSync(path.join(skillDir, "assets", "helper.txt"), "nested", "utf8");
-      fs.writeFileSync(path.join(destinationDir, "README.md"), "repo root readme", "utf8");
+      fs.writeFileSync(
+        path.join(skillDir, "assets", "helper.txt"),
+        "nested",
+        "utf8",
+      );
+      fs.writeFileSync(
+        path.join(destinationDir, "README.md"),
+        "repo root readme",
+        "utf8",
+      );
     });
 
     const exitCode = await runCli(
-      [...withDataDir(root), "skill", "install", "https://github.com/acme/nested-skill-repo"],
+      [
+        ...withDataDir(root),
+        "skill",
+        "install",
+        "https://github.com/acme/nested-skill-repo",
+      ],
       {
         stdout: (message: string) => stdout.push(message),
         stderr: (message: string) => stderr.push(message),
@@ -889,12 +1133,25 @@ describe("standalone cli wiring", () => {
       const skillB = path.join(destinationDir, "skills", "b-skill");
       fs.mkdirSync(skillA, { recursive: true });
       fs.mkdirSync(skillB, { recursive: true });
-      fs.writeFileSync(path.join(skillA, "SKILL.md"), "---\nname: a-skill\n---\n", "utf8");
-      fs.writeFileSync(path.join(skillB, "SKILL.md"), "---\nname: b-skill\n---\n", "utf8");
+      fs.writeFileSync(
+        path.join(skillA, "SKILL.md"),
+        "---\nname: a-skill\n---\n",
+        "utf8",
+      );
+      fs.writeFileSync(
+        path.join(skillB, "SKILL.md"),
+        "---\nname: b-skill\n---\n",
+        "utf8",
+      );
     });
 
     const exitCode = await runCli(
-      [...withDataDir(root), "skill", "install", "https://github.com/acme/multi-skill-repo"],
+      [
+        ...withDataDir(root),
+        "skill",
+        "install",
+        "https://github.com/acme/multi-skill-repo",
+      ],
       {
         stdout: (message: string) => stdout.push(message),
         stderr: (message: string) => stderr.push(message),
@@ -905,7 +1162,9 @@ describe("standalone cli wiring", () => {
     );
 
     expect(exitCode).not.toBe(0);
-    expect(stderr.join("\n")).toContain("Multiple skill directories found in repository");
+    expect(stderr.join("\n")).toContain(
+      "Multiple skill directories found in repository",
+    );
   });
 
   it("deletes a skill while keeping platform installs when requested", async () => {
@@ -989,11 +1248,13 @@ describe("standalone cli wiring", () => {
     const firstPlatform = baseSkillService.getSupportedPlatforms()[0];
     const skillService = {
       ...baseSkillService,
-      uninstallSkillMd: vi.fn(async (_skillName: string, platformId: string) => {
-        if (platformId === firstPlatform.id) {
-          throw new Error("mock uninstall failure");
-        }
-      }),
+      uninstallSkillMd: vi.fn(
+        async (_skillName: string, platformId: string) => {
+          if (platformId === firstPlatform.id) {
+            throw new Error("mock uninstall failure");
+          }
+        },
+      ),
     };
 
     const deleteRes = await execCli(
@@ -1012,6 +1273,40 @@ describe("standalone cli wiring", () => {
       status: "rejected",
       reason: "mock uninstall failure",
     });
+  });
+
+  it("renders skill scan table output when a safety report has no findings array", async () => {
+    const root = makeTempRoot(tempDirs);
+    const partialSafetyReport = {
+      level: "warn",
+    } as unknown as SkillSafetyReport;
+    const skillService = {
+      ...createCliSkillService(),
+      scanLocalPreview: vi.fn(async () => [
+        {
+          name: "partial-report-skill",
+          description: "Partial safety report fixture",
+          author: "CLI Test",
+          tags: [],
+          instructions: "# Partial Report Skill",
+          filePath: path.join(root, "partial-report-skill", "SKILL.md"),
+          localPath: path.join(root, "partial-report-skill"),
+          platforms: ["Custom"],
+          safetyReport: partialSafetyReport,
+        },
+      ]),
+    };
+
+    const result = await execCli(
+      [...withDataDir(root), "--output", "table", "skill", "scan", root],
+      skillService,
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(result.joinedStdout).toContain("partial-report-skill");
+    expect(result.joinedStdout).toContain("warn");
+    expect(result.joinedStdout).toContain("0");
+    expect(result.stderr).toEqual([]);
   });
 
   it("supports skill versions, repo operations, export, sync, safety scan, and rollback", async () => {
@@ -1106,6 +1401,7 @@ describe("standalone cli wiring", () => {
     expect(repoReadRes.json).toEqual({
       path: "notes/final.md",
       content: "Draft note",
+      encoding: "text",
       isDirectory: false,
     });
 
@@ -1181,7 +1477,10 @@ describe("standalone cli wiring", () => {
     expect(safetyRes.json.level).toBe("warn");
     expect(safetyRes.json.findings).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ code: "dangerous-command", severity: "high" }),
+        expect.objectContaining({
+          code: "dangerous-command",
+          severity: "high",
+        }),
       ]),
     );
 
@@ -1204,10 +1503,9 @@ describe("standalone cli wiring", () => {
     ]);
     expect(versionsRes.exitCode).toBe(0);
     expect(versionsRes.json).toHaveLength(2);
-    expect(versionsRes.json.map((version: { note?: string }) => version.note)).toEqual([
-      "synced",
-      "baseline",
-    ]);
+    expect(
+      versionsRes.json.map((version: { note?: string }) => version.note),
+    ).toEqual(["synced", "baseline"]);
 
     const exportJsonRes = await execCli([
       ...withDataDir(root),
@@ -1231,7 +1529,9 @@ describe("standalone cli wiring", () => {
     ]);
     expect(exportSkillMdRes.exitCode).toBe(0);
     expect(exportSkillMdRes.joinedStdout).toContain("name: writer-skill");
-    expect(exportSkillMdRes.joinedStdout).toContain("Use curl before publishing.");
+    expect(exportSkillMdRes.joinedStdout).toContain(
+      "Use curl before publishing.",
+    );
 
     const rollbackRes = await execCli([
       ...withDataDir(root),
@@ -1253,7 +1553,9 @@ describe("standalone cli wiring", () => {
       "SKILL.md",
     ]);
     expect(rolledBackSkillMdRes.exitCode).toBe(0);
-    expect(rolledBackSkillMdRes.json.content).toContain("description: Original skill");
+    expect(rolledBackSkillMdRes.json.content).toContain(
+      "description: Original skill",
+    );
     expect(rolledBackSkillMdRes.json.content).toContain("Use calm language.");
 
     const rolledBackGuideRes = await execCli([
@@ -1419,7 +1721,11 @@ describe("standalone cli wiring", () => {
       ].join("\n"),
       "utf8",
     );
-    fs.writeFileSync(path.join(skillDir, "assets", "helper.txt"), "helper", "utf8");
+    fs.writeFileSync(
+      path.join(skillDir, "assets", "helper.txt"),
+      "helper",
+      "utf8",
+    );
 
     try {
       process.env.HOME = path.join(root, "home");
@@ -1450,7 +1756,9 @@ describe("standalone cli wiring", () => {
         "directory-platform-skill",
       );
       expect(fs.existsSync(path.join(platformDir, "SKILL.md"))).toBe(true);
-      expect(fs.existsSync(path.join(platformDir, "assets", "helper.txt"))).toBe(true);
+      expect(
+        fs.existsSync(path.join(platformDir, "assets", "helper.txt")),
+      ).toBe(true);
       expect(
         fs.readFileSync(path.join(platformDir, "assets", "helper.txt"), "utf8"),
       ).toBe("helper");
@@ -1591,12 +1899,20 @@ describe("standalone cli wiring", () => {
     expect(importRes.exitCode).toBe(0);
     expect(importRes.json.imported).toBe(true);
 
-    const importedPrompts = await execCli([...withDataDir(targetRoot), "prompt", "list"]);
+    const importedPrompts = await execCli([
+      ...withDataDir(targetRoot),
+      "prompt",
+      "list",
+    ]);
     expect(importedPrompts.exitCode).toBe(0);
     expect(importedPrompts.json).toHaveLength(1);
     expect(importedPrompts.json[0].title).toBe("Workspace Prompt");
 
-    const importedFolders = await execCli([...withDataDir(targetRoot), "folder", "list"]);
+    const importedFolders = await execCli([
+      ...withDataDir(targetRoot),
+      "folder",
+      "list",
+    ]);
     expect(importedFolders.exitCode).toBe(0);
     expect(importedFolders.json).toHaveLength(1);
     expect(importedFolders.json[0].name).toBe("Workspace Folder");
@@ -1689,7 +2005,10 @@ describe("standalone cli wiring", () => {
     expect(listRes.exitCode).toBe(0);
     expect(listRes.json).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ id: "project:docs-site", platformName: "Docs Site" }),
+        expect.objectContaining({
+          id: "project:docs-site",
+          platformName: "Docs Site",
+        }),
       ]),
     );
 
@@ -1737,129 +2056,142 @@ describe("standalone cli wiring", () => {
   it("lists, reads, restores, and deletes rule versions", async () => {
     const root = makeTempRoot(tempDirs);
 
-    const initialSaveRes = await execCli([
-      ...withDataDir(root),
-      "rules",
-      "save",
-      "claude-global",
-      "--content",
-      "# Rule v1\n\nStay concise.",
-    ]);
-    expect(initialSaveRes.exitCode).toBe(0);
-
-    const secondSaveRes = await execCli([
-      ...withDataDir(root),
-      "rules",
-      "save",
-      "claude-global",
-      "--content",
-      "# Rule v2\n\nStay extremely concise.",
-    ]);
-    expect(secondSaveRes.exitCode).toBe(0);
-
-    const versionsRes = await execCli([
-      ...withDataDir(root),
-      "rules",
-      "versions",
-      "claude-global",
-    ]);
-    expect(versionsRes.exitCode).toBe(0);
-    expect(versionsRes.json.length).toBeGreaterThanOrEqual(2);
-
-    const olderVersionId = versionsRes.json[1].id as string;
-    const versionReadRes = await execCli([
-      ...withDataDir(root),
-      "rules",
-      "version-read",
-      "claude-global",
-      olderVersionId,
-    ]);
-    expect(versionReadRes.exitCode).toBe(0);
-    expect(versionReadRes.json.content).toContain("Stay concise.");
-
-    const restoreRes = await execCli([
-      ...withDataDir(root),
-      "rules",
-      "version-restore",
-      "claude-global",
-      olderVersionId,
-    ]);
-    expect(restoreRes.exitCode).toBe(0);
-    expect(restoreRes.json.content).toContain("Stay concise.");
-
-    const readRes = await execCli([
-      ...withDataDir(root),
-      "rules",
-      "read",
-      "claude-global",
-    ]);
-    expect(readRes.exitCode).toBe(0);
-    expect(readRes.json.content).toContain("Stay concise.");
-    expect(readRes.json.versions.length).toBeGreaterThanOrEqual(3);
-
-    const deleteRes = await execCli([
-      ...withDataDir(root),
-      "rules",
-      "version-delete",
-      "claude-global",
-      olderVersionId,
-    ]);
-    expect(deleteRes.exitCode).toBe(0);
-    expect(
-      deleteRes.json.some((version: { id: string }) => version.id === olderVersionId),
-    ).toBe(false);
-  });
-
-  it("rewrites a rule through explicit AI config", async () => {
-    const root = makeTempRoot(tempDirs);
-    const originalFetch = global.fetch;
-    const fetchMock = vi.fn(async () =>
-      new Response(
-        JSON.stringify({
-          choices: [{ message: { content: "# Rewritten by CLI" } }],
-        }),
-        {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        },
-      ),
-    );
-    global.fetch = fetchMock as typeof fetch;
-
-    try {
-      const saveRes = await execCli([
+    await withTempHome(root, async (homeDir) => {
+      const initialSaveRes = await execCli([
         ...withDataDir(root),
         "rules",
         "save",
         "claude-global",
         "--content",
-        "# Original Claude Rule",
+        "# Rule v1\n\nStay concise.",
       ]);
-      expect(saveRes.exitCode).toBe(0);
+      expect(initialSaveRes.exitCode).toBe(0);
+      expect(
+        fs.readFileSync(path.join(homeDir, ".claude", "CLAUDE.md"), "utf8"),
+      ).toContain("Stay concise.");
 
-      const rewriteRes = await execCli([
+      const secondSaveRes = await execCli([
         ...withDataDir(root),
         "rules",
-        "rewrite",
+        "save",
         "claude-global",
-        "--instruction",
-        "Tighten the structure",
-        "--api-key",
-        "test-key",
-        "--api-url",
-        "https://api.openai.com/v1",
-        "--model",
-        "gpt-4o-mini",
-        "--provider",
-        "openai",
-        "--api-protocol",
-        "openai",
+        "--content",
+        "# Rule v2\n\nStay extremely concise.",
       ]);
+      expect(secondSaveRes.exitCode).toBe(0);
 
-      expect(rewriteRes.exitCode).toBe(0);
-      expect(rewriteRes.json).toEqual({
-        content: "# Rewritten by CLI",
-        summary: "AI rewrite generated a new draft.",
+      const versionsRes = await execCli([
+        ...withDataDir(root),
+        "rules",
+        "versions",
+        "claude-global",
+      ]);
+      expect(versionsRes.exitCode).toBe(0);
+      expect(versionsRes.json.length).toBeGreaterThanOrEqual(2);
+
+      const olderVersionId = versionsRes.json[1].id as string;
+      const versionReadRes = await execCli([
+        ...withDataDir(root),
+        "rules",
+        "version-read",
+        "claude-global",
+        olderVersionId,
+      ]);
+      expect(versionReadRes.exitCode).toBe(0);
+      expect(versionReadRes.json.content).toContain("Stay concise.");
+
+      const restoreRes = await execCli([
+        ...withDataDir(root),
+        "rules",
+        "version-restore",
+        "claude-global",
+        olderVersionId,
+      ]);
+      expect(restoreRes.exitCode).toBe(0);
+      expect(restoreRes.json.content).toContain("Stay concise.");
+
+      const readRes = await execCli([
+        ...withDataDir(root),
+        "rules",
+        "read",
+        "claude-global",
+      ]);
+      expect(readRes.exitCode).toBe(0);
+      expect(readRes.json.content).toContain("Stay concise.");
+      expect(readRes.json.versions.length).toBeGreaterThanOrEqual(3);
+
+      const deleteRes = await execCli([
+        ...withDataDir(root),
+        "rules",
+        "version-delete",
+        "claude-global",
+        olderVersionId,
+      ]);
+      expect(deleteRes.exitCode).toBe(0);
+      expect(
+        deleteRes.json.some(
+          (version: { id: string }) => version.id === olderVersionId,
+        ),
+      ).toBe(false);
+    });
+  });
+
+  it("rewrites a rule through explicit AI config", async () => {
+    const root = makeTempRoot(tempDirs);
+    const originalFetch = global.fetch;
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            choices: [{ message: { content: "# Rewritten by CLI" } }],
+          }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        ),
+    );
+    global.fetch = fetchMock as typeof fetch;
+
+    try {
+      await withTempHome(root, async (homeDir) => {
+        const saveRes = await execCli([
+          ...withDataDir(root),
+          "rules",
+          "save",
+          "claude-global",
+          "--content",
+          "# Original Claude Rule",
+        ]);
+        expect(saveRes.exitCode).toBe(0);
+        expect(
+          fs.readFileSync(path.join(homeDir, ".claude", "CLAUDE.md"), "utf8"),
+        ).toBe("# Original Claude Rule");
+
+        const rewriteRes = await execCli([
+          ...withDataDir(root),
+          "rules",
+          "rewrite",
+          "claude-global",
+          "--instruction",
+          "Tighten the structure",
+          "--api-key",
+          "test-key",
+          "--api-url",
+          "https://api.openai.com/v1",
+          "--model",
+          "gpt-4o-mini",
+          "--provider",
+          "openai",
+          "--api-protocol",
+          "openai",
+        ]);
+
+        expect(rewriteRes.exitCode).toBe(0);
+        expect(rewriteRes.json).toEqual({
+          content: "# Rewritten by CLI",
+          summary: "AI rewrite generated a new draft.",
+        });
       });
       expect(fetchMock).toHaveBeenCalledTimes(1);
     } finally {
@@ -1928,7 +2260,12 @@ describe("standalone cli wiring", () => {
 
   it("requires content for rules save", async () => {
     const root = makeTempRoot(tempDirs);
-    const result = await execCli([...withDataDir(root), "rules", "save", "claude-global"]);
+    const result = await execCli([
+      ...withDataDir(root),
+      "rules",
+      "save",
+      "claude-global",
+    ]);
 
     expect(result.exitCode).toBe(2);
     expect(result.errorJson.error.code).toBe("USAGE_ERROR");

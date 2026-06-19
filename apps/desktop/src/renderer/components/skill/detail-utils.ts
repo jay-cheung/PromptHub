@@ -7,7 +7,9 @@ import type {
 } from "@prompthub/shared/types";
 import type { SkillPlatform } from "@prompthub/shared/constants/platforms";
 import type { AIModelConfig } from "../../stores/settings.store";
+import { parseGitRepo } from "@prompthub/shared/utils/git-repo";
 import { scheduleAllSaveSync } from "../../services/webdav-save-sync";
+import { detectAgentPlatformSkillSource } from "../../services/skill-agent-source";
 import { detectRemoteSourceChannel } from "../../services/skill-source-channel";
 
 export const SKILL_NAME_REGEX = /^[a-z0-9]+(-[a-z0-9]+)*$/;
@@ -100,6 +102,11 @@ export function formatSkillSafetyScanError(
   return `${t("skill.safetyScanFailed", "Safety scan failed")}: ${rawMessage}`;
 }
 
+export function formatSkillInstallError(error: unknown, t: TFunction): string {
+  const rawMessage = getErrorMessage(error);
+  return `${t("skill.storeInstallFailed", "Install failed")}: ${rawMessage}`;
+}
+
 export interface SkillSourceMeta {
   kind: "github" | "remote" | "local";
   value: string;
@@ -121,6 +128,38 @@ function isLikelyRemoteGitUrl(value: string): boolean {
 export interface GitHubMarkdownBase {
   hrefBase: string;
   imageBase: string;
+}
+
+const SAFE_MARKDOWN_LINK_PROTOCOLS = new Set(["http:", "https:", "mailto:", "tel:"]);
+const SAFE_MARKDOWN_IMAGE_PROTOCOLS = new Set(["http:", "https:"]);
+const SAFE_SKILL_EXTERNAL_PROTOCOLS = new Set(["http:", "https:"]);
+const EXPLICIT_URL_PROTOCOL_REGEX = /^[a-z][a-z0-9+.-]*:/i;
+const WINDOWS_ABSOLUTE_PATH_REGEX = /^[a-z]:[\\/]/i;
+
+export function resolveSkillExternalUrl(value?: string | null): string {
+  const trimmed = value?.trim() ?? "";
+  if (!trimmed) {
+    return "";
+  }
+
+  try {
+    const parsed = new URL(trimmed);
+    return SAFE_SKILL_EXTERNAL_PROTOCOLS.has(parsed.protocol)
+      ? parsed.toString()
+      : "";
+  } catch {
+    return "";
+  }
+}
+
+function hasUnsafeExplicitSourceProtocol(value: string): boolean {
+  const trimmed = value.trim();
+  if (WINDOWS_ABSOLUTE_PATH_REGEX.test(trimmed)) {
+    return false;
+  }
+  return (
+    EXPLICIT_URL_PROTOCOL_REGEX.test(trimmed) && !resolveSkillExternalUrl(trimmed)
+  );
 }
 
 export interface DiffLine {
@@ -165,6 +204,10 @@ export function getSkillSourceMeta(
     return null;
   }
 
+  if (hasUnsafeExplicitSourceProtocol(sourceValue)) {
+    return null;
+  }
+
   if (/^https?:\/\/github\.com\//i.test(sourceValue)) {
     return {
       kind: "github",
@@ -193,7 +236,9 @@ export function getSkillSourceMeta(
     sourceUrl: sourceValue,
     sourceLabel: skill.source_label,
   });
+  const parsedGitRepo = parseGitRepo(sourceValue);
   const isRemoteGitSource =
+    parsedGitRepo !== null ||
     isLikelyRemoteGitUrl(sourceValue) ||
     remoteChannel === "github" ||
     remoteChannel === "gitee" ||
@@ -225,7 +270,10 @@ export function getSkillSourceMeta(
 
     return {
       kind: "remote",
-      value: sourceValue,
+      value:
+        parsedGitRepo?.protocol === "ssh"
+          ? parsedGitRepo.repositoryUrl
+          : sourceValue,
       displayValue,
       shortValue: displayValue,
       sourceLabel:
@@ -262,10 +310,21 @@ export function getSkillSourceMeta(
       ? `.../${parts[parts.length - 2]}/${parts[parts.length - 1]}`
       : sourceValue;
   const lowerPath = normalized.toLowerCase();
+  const agentSource = detectAgentPlatformSkillSource({
+    sourceLabel: skill.source_label,
+    sourceUrl: skill.source_url,
+    localRepoPath: skill.local_repo_path,
+  });
   let sourceLabel =
     t?.("skill.sourceLocalFolder", "Imported from Local Folder") ||
     "Imported from Local Folder";
-  if (lowerPath.includes("/.claude/skills/")) {
+  if (agentSource) {
+    const fallback = `Imported from ${agentSource.platformName} Agent Skills`;
+    sourceLabel =
+      t?.("skill.sourceAgentPlatformFolder", fallback, {
+        platform: agentSource.platformName,
+      }) || fallback;
+  } else if (lowerPath.includes("/.claude/skills/")) {
     sourceLabel =
       t?.(
         "skill.sourceClaudeLocalFolder",
@@ -366,22 +425,42 @@ export function resolveGitHubMarkdownUrl(
   kind: "link" | "image",
 ): string {
   const trimmed = rawUrl.trim();
-  if (!trimmed || !base) {
+  if (!trimmed) {
+    return "";
+  }
+  if (trimmed.startsWith("#")) {
+    return kind === "link" ? trimmed : "";
+  }
+  if (kind === "image" && trimmed.startsWith("local-image://")) {
     return trimmed;
   }
-  if (
-    /^(https?:|data:|mailto:|tel:|#)/i.test(trimmed) ||
-    trimmed.startsWith("local-image://")
-  ) {
-    return trimmed;
+
+  const allowedProtocols =
+    kind === "image" ? SAFE_MARKDOWN_IMAGE_PROTOCOLS : SAFE_MARKDOWN_LINK_PROTOCOLS;
+
+  if (!base) {
+    try {
+      const parsed = new URL(trimmed);
+      return allowedProtocols.has(parsed.protocol) ? parsed.toString() : "";
+    } catch {
+      return trimmed;
+    }
+  }
+
+  try {
+    const parsed = new URL(trimmed);
+    return allowedProtocols.has(parsed.protocol) ? parsed.toString() : "";
+  } catch {
+    // Relative paths are resolved against the trusted GitHub base below.
   }
 
   const normalized = trimmed.replace(/^\.\//, "");
   const baseUrl = kind === "image" ? base.imageBase : base.hrefBase;
   try {
-    return new URL(normalized, baseUrl).toString();
+    const resolved = new URL(normalized, baseUrl);
+    return allowedProtocols.has(resolved.protocol) ? resolved.toString() : "";
   } catch {
-    return trimmed;
+    return "";
   }
 }
 
@@ -478,9 +557,14 @@ export function downloadSkillExport(
   anchor.download =
     format === "skillmd" ? `${skillName}-SKILL.md` : `${skillName}.json`;
   document.body.appendChild(anchor);
-  anchor.click();
-  document.body.removeChild(anchor);
-  URL.revokeObjectURL(url);
+  try {
+    anchor.click();
+  } finally {
+    if (anchor.parentNode) {
+      anchor.parentNode.removeChild(anchor);
+    }
+    URL.revokeObjectURL(url);
+  }
 }
 
 export function downloadSkillZipExport(result: {
@@ -495,9 +579,14 @@ export function downloadSkillZipExport(result: {
   anchor.href = url;
   anchor.download = result.fileName;
   document.body.appendChild(anchor);
-  anchor.click();
-  document.body.removeChild(anchor);
-  URL.revokeObjectURL(url);
+  try {
+    anchor.click();
+  } finally {
+    if (anchor.parentNode) {
+      anchor.parentNode.removeChild(anchor);
+    }
+    URL.revokeObjectURL(url);
+  }
 }
 
 export async function restoreSkillVersion(

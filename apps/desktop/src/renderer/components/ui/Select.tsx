@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useLayoutEffect } from 'react';
+import { useState, useRef, useEffect, useLayoutEffect, useId } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import { ChevronDownIcon, CheckIcon } from 'lucide-react';
@@ -16,6 +16,8 @@ export interface SelectProps {
   options: SelectOption[];
   placeholder?: string;
   className?: string;
+  ariaLabel?: string;
+  triggerClassName?: string;
   disabled?: boolean;
 }
 
@@ -25,10 +27,13 @@ export function Select({
   options,
   placeholder,
   className = '',
+  ariaLabel,
+  triggerClassName,
   disabled = false,
 }: SelectProps) {
   const { t } = useTranslation();
   const [isOpen, setIsOpen] = useState(false);
+  const listboxId = useId();
   const [dropdownStyle, setDropdownStyle] = useState<{
     top: number;
     left: number;
@@ -80,6 +85,10 @@ export function Select({
   // Close when clicking outside
   // 点击外部关闭
   useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+
     const handleClickOutside = (event: MouseEvent) => {
       const targetNode = event.target as Node;
       const clickedTrigger = containerRef.current?.contains(targetNode);
@@ -91,7 +100,7 @@ export function Select({
     };
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, []);
+  }, [isOpen]);
 
   // Close on ESC
   // 按 ESC 键关闭
@@ -129,21 +138,29 @@ export function Select({
       {/* 触发按钮 */}
       <button
         type="button"
+        aria-label={ariaLabel}
+        aria-haspopup="listbox"
+        aria-expanded={isOpen}
+        aria-controls={isOpen ? listboxId : undefined}
         onClick={() => !disabled && setIsOpen(!isOpen)}
         disabled={disabled}
-        className={`
-          w-full h-10 px-3 rounded-lg bg-muted border-0 text-sm text-left
-          flex items-center justify-between gap-2
-          focus:outline-none focus:ring-2 focus:ring-primary/30
-          transition-all duration-quick
-          ${disabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer hover:bg-muted/80'}
-          ${isOpen ? 'ring-2 ring-primary/30' : ''}
-        `}
+        className={
+          triggerClassName ??
+          `
+            w-full h-10 px-3 rounded-lg bg-muted border-0 text-sm text-left
+            flex items-center justify-between gap-2
+            focus:outline-none focus:ring-2 focus:ring-primary/30
+            transition-all duration-quick
+            ${disabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer hover:bg-muted/80'}
+            ${isOpen ? 'ring-2 ring-primary/30' : ''}
+          `
+        }
       >
         <span className={selectedOption ? 'text-foreground' : 'text-muted-foreground'}>
           {displayLabel}
         </span>
         <ChevronDownIcon
+          aria-hidden="true"
           className={`w-4 h-4 text-muted-foreground transition-transform duration-base ${
             isOpen ? 'rotate-180' : ''
           }`}
@@ -155,7 +172,10 @@ export function Select({
       {isOpen && dropdownStyle && typeof document !== 'undefined'
         ? createPortal(
             <div
+              id={listboxId}
               ref={listRef}
+              role="listbox"
+              aria-label={ariaLabel}
               className="
                 fixed min-w-[180px]
                 bg-popover border border-border rounded-lg shadow-lg
@@ -231,6 +251,9 @@ function OptionItem({
   return (
     <button
       type="button"
+      role="option"
+      aria-selected={isSelected}
+      aria-label={option.labelText}
       onClick={onSelect}
       className={`
         w-full px-3 py-2 text-sm text-left
@@ -243,7 +266,7 @@ function OptionItem({
       `}
     >
       <span className="truncate">{option.label}</span>
-      {isSelected && <CheckIcon className="w-4 h-4 flex-shrink-0" />}
+      {isSelected && <CheckIcon aria-hidden="true" className="w-4 h-4 flex-shrink-0" />}
     </button>
   );
 }

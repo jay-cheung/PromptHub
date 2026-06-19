@@ -3,7 +3,20 @@ import { persist } from "zustand/middleware";
 
 type ViewMode = "prompt" | "skill";
 
-export type AppModule = ViewMode | "rules";
+export type AppModule = ViewMode | "rules" | "mcp" | "plugin";
+export type SettingsSectionId =
+  | "web"
+  | "devices"
+  | "general"
+  | "appearance"
+  | "security"
+  | "data"
+  | "skill"
+  | "ai"
+  | "language"
+  | "shortcuts"
+  | "about"
+  | "cli";
 
 /**
  * Default and safe bounds for the resizable folder sidebar panel.
@@ -28,6 +41,20 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
 }
 
+function normalizeAppModule(value: unknown): AppModule {
+  return value === "skill" ||
+    value === "rules" ||
+    value === "mcp" ||
+    value === "plugin" ||
+    value === "prompt"
+    ? value
+    : "prompt";
+}
+
+function getViewModeForModule(module: AppModule): ViewMode {
+  return module === "skill" ? "skill" : "prompt";
+}
+
 interface UIState {
   viewMode: ViewMode;
   appModule: AppModule;
@@ -43,18 +70,21 @@ interface UIState {
   setSidebarPanelWidth: (width: number) => void;
   setPromptListPaneWidth: (width: number) => void;
   resetColumnWidths: () => void;
+  pendingSettingsSection: SettingsSectionId | null;
+  requestSettingsSection: (section: SettingsSectionId) => void;
+  consumeSettingsSectionRequest: () => SettingsSectionId | null;
 }
 
 export const useUIStore = create<UIState>()(
   persist(
-    (set) => ({
+    (set, get) => ({
       viewMode: "prompt",
       appModule: "prompt",
       setViewMode: (mode) => set({ viewMode: mode, appModule: mode }),
       setAppModule: (mode) =>
         set({
           appModule: mode,
-          viewMode: mode === "rules" ? "prompt" : mode,
+          viewMode: mode === "skill" ? "skill" : "prompt",
         }),
       isSidebarCollapsed: false,
       toggleSidebar: () =>
@@ -84,13 +114,24 @@ export const useUIStore = create<UIState>()(
           sidebarPanelWidth: SIDEBAR_PANEL_WIDTH_DEFAULT,
           promptListPaneWidth: PROMPT_LIST_PANE_WIDTH_DEFAULT,
         }),
+      pendingSettingsSection: null,
+      requestSettingsSection: (section) =>
+        set({ pendingSettingsSection: section }),
+      consumeSettingsSectionRequest: () => {
+        const section = get().pendingSettingsSection;
+        set({ pendingSettingsSection: null });
+        return section;
+      },
     }),
     {
       name: "ui-storage",
       // Persist sidebar collapse state AND the user's chosen column widths
-      // so the layout survives across sessions (#119). viewMode still resets
-      // to 'prompt' on launch by design.
+      // so the layout survives across sessions (#119). The active home module
+      // is also persisted so reopening the app returns to the user's last
+      // Prompts / Skills / Rules workspace instead of forcing Prompts.
       partialize: (state) => ({
+        appModule: state.appModule,
+        viewMode: state.viewMode,
         isSidebarCollapsed: state.isSidebarCollapsed,
         sidebarPanelWidth: state.sidebarPanelWidth,
         promptListPaneWidth: state.promptListPaneWidth,
@@ -100,8 +141,11 @@ export const useUIStore = create<UIState>()(
       // a sane value instead of leaving the column in a broken state.
       merge: (persisted, current) => {
         const merged = { ...current, ...(persisted as Partial<UIState>) };
+        const appModule = normalizeAppModule(merged.appModule);
         return {
           ...merged,
+          appModule,
+          viewMode: getViewModeForModule(appModule),
           sidebarPanelWidth: clamp(
             merged.sidebarPanelWidth ?? SIDEBAR_PANEL_WIDTH_DEFAULT,
             SIDEBAR_PANEL_WIDTH_MIN,

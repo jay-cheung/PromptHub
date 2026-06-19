@@ -173,6 +173,14 @@ C1–C6 进入仓库后，本地 Electron 实测发现下面 5 个真实问题�
 4. **`fix(toast): collision-proof ids and exit-animation guard`** — `Date.now().toString()` 在同一毫秒内 showToast 会撞 id；3s auto-dismiss 与手动关闭可能让 removeToast double-fire。改用 `Date.now() + monotonic counter`，并把 auto-dismiss timer 单独放进 `autoDismissTimers` Map，进入退出动画后不允许再次触发。
 5. **`feat(motion): animate rules editor/diff and agent switches`** — Rules 切 agent / 切 editor↔diff 没有视觉过渡。给 RulesManager 根加 `animate-in fade-in`、grid 加 `key={currentFile?.id}` 触发切换动画、editor / diff 分支各自有稳定 key；同时把 C3 漏掉的手写 SVG spinner 换成 `Loader2Icon`。
 
+6. **Skill 管理横向切换补齐（2026-06-02）** — 用户反馈 Skill 管理里 My Skills / Project Skills / Agent Skills / Store，以及 Project/Agent 内部切换不同目标时缺少丝滑动画；第一版补成了纵向 `slide-in-from-bottom-2`，复核后改为横向 `slide-in-from-right-3`。`SkillManager` 增加 `SkillViewTransition` keyed wrapper，`SkillAgentsView` 与 `SkillProjectsView` 的右侧详情 shell 分别按 `selectedPlatformId` / `selectedProject.id` remount，从右侧淡入。同步补 `skill-i18n-smoke`、`skill-agents-view`、`skill-projects-view` 断言，防止页面/详情切换回退到纵向动画。
+
+   验证：`pnpm --filter @prompthub/desktop exec vitest run tests/unit/components/skill-i18n-smoke.test.tsx tests/unit/components/skill-agents-view.test.tsx tests/unit/components/skill-projects-view.test.tsx`，49/49 通过。过程中发现 `skill-agents-view` 的安装弹窗测试会在 Agent 初始化完成前点击 disabled 按钮，调整为先等待 Claude Code 平台卡片出现并确认安装按钮可用，测试仍覆盖真实弹窗和 symlink API 调用。
+
+7. **手写 spinner 收敛（2026-06-06）** — 静态扫描发现 App 启动态、Settings 懒加载、MainContent 懒加载、AI Settings 默认模型测试按钮、DataRecoveryDialog 成功/预览加载态、SkillManager 多个 Suspense fallback 仍直接写 `border-2 border-t-transparent rounded-full animate-spin`。新增共享 `apps/desktop/src/renderer/components/ui/Spinner.tsx`，基于 `Loader2Icon` 提供 `size` / `tone` / 可选 `label`，统一 `motion-reduce:animate-none` 与装饰性 `aria-hidden` 行为；11 处手写 CSS spinner 全部替换为 `<Spinner>`。
+
+   验证：`rg "border.*border-t-transparent.*animate-spin|animate-spin.*border-t-transparent" apps/desktop/src/renderer apps/desktop/tests` 零命中；`pnpm --filter @prompthub/desktop test -- tests/unit/components/spinner.test.tsx tests/unit/components/data-recovery-dialog.test.tsx tests/unit/components/ai-settings-prototype.test.tsx --run`，39/39 通过；`pnpm --filter @prompthub/desktop typecheck` 通过；`pnpm --filter @prompthub/desktop lint` 通过；`pnpm --filter @prompthub/desktop build` 通过。`pnpm --filter @prompthub/desktop bundle:budget` 当前失败在既有 `main entry (index-*.js)`：436.03 KB gzip 超过 384 KB 预算；markdown / settings / ui-vendor / react / icons / i18n / css 预算项均通过。本次不放宽预算，保留为后续主入口拆包优化项。
+
 期间还加固了 token 体系：把 Tailwind 的 `transitionDuration / transitionTimingFunction / animationDuration / animationTimingFunction` 全部改成 `var(--motion-duration-*) / var(--motion-easing-*)`，让 `[data-motion="reduced"]` 改 CSS 变量后能 cascade 到 Tailwind utility，3 档偏好对所有 transition / animation 都真实生效（之前只对手写 CSS 生效）。
 
 最终 baseline：

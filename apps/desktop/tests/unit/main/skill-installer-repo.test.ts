@@ -6,11 +6,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const fsMocks = vi.hoisted(() => ({
   mkdir: vi.fn(),
   cp: vi.fn(),
+  readFile: vi.fn(),
   writeFile: vi.fn(),
   stat: vi.fn(),
   lstat: vi.fn(),
   rm: vi.fn(),
   symlink: vi.fn(),
+  rename: vi.fn(),
   readdir: vi.fn(),
   realpath: vi.fn(async (value: string) => value),
 }));
@@ -71,9 +73,11 @@ describe("skill-installer-repo variant container", () => {
     fsMocks.lstat.mockResolvedValue({ isSymbolicLink: () => false });
     fsMocks.mkdir.mockResolvedValue(undefined);
     fsMocks.cp.mockResolvedValue(undefined);
+    fsMocks.readFile.mockResolvedValue("");
     fsMocks.writeFile.mockResolvedValue(undefined);
     fsMocks.rm.mockResolvedValue(undefined);
     fsMocks.symlink.mockResolvedValue(undefined);
+    fsMocks.rename.mockResolvedValue(undefined);
   });
 
   it("stores managed repos inside a stable variant container", () => {
@@ -117,6 +121,64 @@ describe("skill-installer-repo variant container", () => {
     ).resolves.toBe("/prompthub/skills/skill-1");
   });
 
+  it("uses a longer readable suffix when the preferred short suffix container belongs to another variant", async () => {
+    internalMocks.fileExists.mockImplementation(async (targetPath: string) =>
+      targetPath === "/prompthub/skills/writer--7dc211f6",
+    );
+    fsMocks.readFile.mockResolvedValue(
+      JSON.stringify({
+        logicalName: "writer",
+        variantKey: "writer--7dc211f6",
+        sourceId: "source-writer-stable",
+      }),
+    );
+
+    await expect(
+      getManagedContainerPathForSkill({
+        id: "skill-dev",
+        name: "writer",
+        source_id: "source-writer-main",
+      }),
+    ).resolves.toBe("/prompthub/skills/writer--7dc211f6e9ce");
+  });
+
+  it("writes fallback container metadata with the actual longer variant key", async () => {
+    internalMocks.fileExists.mockImplementation(async (targetPath: string) =>
+      targetPath === "/prompthub/skills/writer--7dc211f6",
+    );
+    fsMocks.readFile.mockResolvedValue(
+      JSON.stringify({
+        logicalName: "writer",
+        variantKey: "writer--7dc211f6",
+        sourceId: "source-writer-stable",
+      }),
+    );
+
+    await saveContentToLocalRepoBySkillId(
+      {
+        id: "skill-dev",
+        name: "writer",
+        source_id: "source-writer-main",
+      },
+      "# Writer dev\n",
+    );
+
+    expect(fsMocks.mkdir).toHaveBeenCalledWith(
+      "/prompthub/skills/writer--7dc211f6e9ce",
+      { recursive: true },
+    );
+    expect(fsMocks.writeFile).toHaveBeenCalledWith(
+      "/prompthub/skills/writer--7dc211f6e9ce/.prompthub/source.json",
+      expect.stringContaining('"variantKey": "writer--7dc211f6e9ce"'),
+      "utf-8",
+    );
+    expect(fsMocks.writeFile).toHaveBeenCalledWith(
+      "/prompthub/skills/writer--7dc211f6e9ce/repo/SKILL.md",
+      "# Writer dev\n",
+      "utf-8",
+    );
+  });
+
   it("writes SKILL.md into the repo subdirectory and sidecar metadata into .prompthub", async () => {
     await saveContentToLocalRepoBySkillId(
       {
@@ -152,7 +214,7 @@ describe("skill-installer-repo variant container", () => {
     );
   });
 
-  it("keeps metadata in the container while symlinking only the repo directory", async () => {
+  it("materializes requested symlink mode inside the managed data repo", async () => {
     await saveToLocalRepoBySkillId(
       {
         id: "skill-1",
@@ -163,14 +225,18 @@ describe("skill-installer-repo variant container", () => {
       "symlink",
     );
 
-    expect(fsMocks.symlink).toHaveBeenCalledWith(
+    expect(fsMocks.symlink).not.toHaveBeenCalled();
+    expect(fsMocks.cp).toHaveBeenCalledWith(
       "/external/writer",
       "/prompthub/skills/writer--7dc211f6/repo",
-      "dir",
+      expect.objectContaining({
+        recursive: true,
+        filter: expect.any(Function),
+      }),
     );
     expect(fsMocks.writeFile).toHaveBeenCalledWith(
       "/prompthub/skills/writer--7dc211f6/.prompthub/variant.json",
-      expect.stringContaining('"repoMode": "symlink"'),
+      expect.stringContaining('"repoMode": "copy"'),
       "utf-8",
     );
   });

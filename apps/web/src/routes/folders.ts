@@ -8,6 +8,8 @@ import { parseJsonBody } from '../utils/validation.js';
 
 const folders = new Hono();
 const folderService = new FolderService();
+const MAX_FOLDER_REORDER_IDS = 500;
+const MAX_FOLDER_ID_LENGTH = 200;
 
 const createFolderSchema = z.object({
   name: z.string().trim().min(1, 'name is required').max(200, 'name is too long'),
@@ -17,12 +19,35 @@ const createFolderSchema = z.object({
   visibility: z.enum(['private', 'shared']).optional(),
 });
 
+const directFolderSchema = z.object({
+  id: z.string().trim().min(1),
+  ownerUserId: z.string().nullable().optional(),
+  visibility: z.enum(['private', 'shared']).optional(),
+  name: z.string().trim().min(1, 'name is required').max(200, 'name is too long'),
+  icon: z.string().trim().min(1).max(50).nullable().optional(),
+  parentId: z.string().trim().min(1).nullable().optional(),
+  order: z.number().int().nonnegative(),
+  isPrivate: z.boolean().optional(),
+  createdAt: z.string().min(1),
+  updatedAt: z.string().min(1),
+});
+
 const updateFolderSchema = createFolderSchema.partial().extend({
+  parentId: z.string().trim().min(1).nullable().optional(),
   order: z.number().int().nonnegative().optional(),
 });
 
 const reorderSchema = z.object({
-  ids: z.array(z.string().trim().min(1)).default([]),
+  ids: z
+    .array(
+      z
+        .string()
+        .trim()
+        .min(1)
+        .max(MAX_FOLDER_ID_LENGTH, `folder id must be at most ${MAX_FOLDER_ID_LENGTH} characters`),
+    )
+    .max(MAX_FOLDER_REORDER_IDS, `ids must contain at most ${MAX_FOLDER_REORDER_IDS} folder ids`)
+    .default([]),
 });
 
 const listQuerySchema = z.object({
@@ -38,6 +63,20 @@ folders.post('/', async (c) => {
   try {
     const actor = getAuthUser(c);
     return success(c, folderService.create(actor, parsed.data), 201);
+  } catch (routeError) {
+    return toFolderErrorResponse(c, routeError);
+  }
+});
+
+folders.post('/direct-insert', async (c) => {
+  const parsed = await parseJsonBody(c, directFolderSchema);
+  if (!parsed.success) {
+    return parsed.response;
+  }
+
+  try {
+    const actor = getAuthUser(c);
+    return success(c, folderService.insertDirect(actor, parsed.data), 201);
   } catch (routeError) {
     return toFolderErrorResponse(c, routeError);
   }

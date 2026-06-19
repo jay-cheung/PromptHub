@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback, useRef, Children, isValidElement, cloneElement, memo, lazy, Suspense, type CSSProperties } from 'react';
+import { useState, useEffect, useMemo, useCallback, useRef, memo, lazy, Suspense, type CSSProperties } from 'react';
 import type { DragEvent as ReactDragEvent } from 'react';
 import { flushSync } from 'react-dom';
 import { useVirtualizer } from '@tanstack/react-virtual';
@@ -14,66 +14,92 @@ import {
 import { resolveScenarioModel } from '../../services/ai-defaults';
 import { PromptListHeader } from '../prompt/PromptListHeader';
 import type { OutputFormatConfig, VariableInputImageAttachment } from '../prompt/VariableInputModal';
+import { Spinner } from '../ui/Spinner';
 
 // Lazy load SkillManager for better initial load performance
 // 懒加载 SkillManager 以提升初始加载性能
 const SkillManager = lazy(() => import('../skill/SkillManager').then(m => ({ default: m.SkillManager })));
 const RulesManager = lazy(() => import('../rules/RulesManager').then(m => ({ default: m.RulesManager })));
+const McpManager = lazy(() => import('../mcp/McpManager').then(m => ({ default: m.McpManager })));
+const PluginManager = lazy(() => import('../plugin/PluginManager').then(m => ({ default: m.PluginManager })));
 const EditPromptModal = lazy(() => import('../prompt/EditPromptModal').then(m => ({ default: m.EditPromptModal })));
 const PromptQuickRewriteDialog = lazy(() => import('../prompt/PromptQuickRewriteDialog').then(m => ({ default: m.PromptQuickRewriteDialog })));
-const PromptTableView = lazy(() => import('../prompt/PromptTableView').then(m => ({ default: m.PromptTableView })));
-const PromptGalleryView = lazy(() => import('../prompt/PromptGalleryView').then(m => ({ default: m.PromptGalleryView })));
-const PromptKanbanView = lazy(() => import('../prompt/PromptKanbanView').then(m => ({ default: m.PromptKanbanView })));
 const AiTestModal = lazy(() => import('../prompt/AiTestModal').then(m => ({ default: m.AiTestModal })));
 const PromptDetailModal = lazy(() => import('../prompt/PromptDetailModal').then(m => ({ default: m.PromptDetailModal })));
 const VariableInputModal = lazy(() => import('../prompt/VariableInputModal').then(m => ({ default: m.VariableInputModal })));
 const VersionHistoryModal = lazy(() => import('../prompt/VersionHistoryModal').then(m => ({ default: m.VersionHistoryModal })));
+const PromptMarkdownContent = lazy(() => import('../prompt/PromptMarkdownContent').then(m => ({ default: m.PromptMarkdownContent })));
 const loadingFallback = (
   <div className="flex-1 flex items-center justify-center">
-    <div className="w-6 h-6 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+    <Spinner />
   </div>
 );
-import { StarIcon, CopyIcon, HistoryIcon, HashIcon, FolderIcon, SparklesIcon, EditIcon, TrashIcon, CheckIcon, PlayIcon, LoaderIcon, XIcon, GitCompareIcon, ClockIcon, GlobeIcon, PinIcon, MessageSquareTextIcon, ImageIcon, DownloadIcon, SaveIcon, ZoomInIcon, Share2Icon, PaperclipIcon } from 'lucide-react';
+import { StarIcon, CopyIcon, HistoryIcon, HashIcon, FolderIcon, SparklesIcon, EditIcon, TrashIcon, CheckIcon, PlayIcon, LoaderIcon, XIcon, GitCompareIcon, GlobeIcon, PinIcon, ImageIcon, SaveIcon, Share2Icon, GripVerticalIcon, CornerDownRightIcon, GitBranchIcon, ChevronDownIcon, ChevronRightIcon } from 'lucide-react';
 import { ContextMenu, ContextMenuItem } from '../ui/ContextMenu';
 import { ImagePreviewModal } from '../ui/ImagePreviewModal';
 import { LocalImage } from '../ui/LocalImage';
-import { Input } from '../ui/Input';
-import { handleMarkdownListKeyDown } from '../ui/Textarea';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
-import { CollapsibleThinking } from '../ui/CollapsibleThinking';
 import { ColumnResizer } from '../ui/ColumnResizer';
 import { useToast } from '../ui/Toast';
-import { chatCompletion, generateImage, buildMessagesFromPrompt, multiModelCompare, AITestResult, StreamCallbacks } from '../../services/ai';
+import { useTemporaryFlag } from '../../hooks/useTemporaryFlag';
+import type { AITestResult, StreamCallbacks } from '../../services/ai';
 import { useTranslation } from 'react-i18next';
-import type { Prompt, PromptVersion, UpdatePromptDTO } from '@prompthub/shared/types';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
-import rehypeSanitize from 'rehype-sanitize';
-import rehypeHighlight from 'rehype-highlight';
-import { defaultSchema } from 'hast-util-sanitize';
+import type { CreatePromptRelationDTO, Prompt, PromptVersion, UpdatePromptDTO } from '@prompthub/shared/types';
 import {
   buildPromptCopyText,
+  copyTextToClipboard,
   hasUserDefinedPromptVariables,
   resolvePromptContentByLanguage,
 } from '../prompt/prompt-copy-utils';
+import { resolvePromptMarkdownHref } from '../prompt/prompt-markdown-url';
 import { PromptQuickRewriteTrigger } from '../prompt/PromptQuickRewriteTrigger';
+import { PromptRelationshipPanel } from '../prompt/PromptRelationshipPanel';
+import { PromptAiResponsePanel } from '../prompt/PromptAiResponsePanel';
+import { PromptDetailMetadata } from '../prompt/PromptDetailMetadata';
+import { PromptViewContainers } from '../prompt/PromptViewContainers';
+import { PromptContentField } from '../prompt/PromptContentField';
+import { PromptDescriptionInput } from '../prompt/PromptDescriptionInput';
 import {
   filterVisiblePrompts,
   sortVisiblePrompts,
 } from '../../services/prompt-filter';
+import {
+  flattenPromptTree,
+  getPromptHierarchyMeta,
+  getPromptDropPosition,
+  getPromptMoveTarget,
+  type PromptDropPosition,
+} from '../prompt/prompt-drag-utils';
 import { getFlattenedTree } from './tree/utilities';
 import { renderFolderIcon } from './folderIconHelper';
 
 const PROMPT_CARD_ESTIMATED_HEIGHT = 76;
-const MAX_AI_TEST_IMAGES = 8;
-const MAX_AI_TEST_IMAGE_BYTES = 10 * 1024 * 1024;
-const SUPPORTED_AI_TEST_IMAGE_MIME_TYPES = new Set([
-  'image/png',
-  'image/jpeg',
-  'image/jpg',
-  'image/webp',
-  'image/gif',
-]);
+
+let aiServicePromise: Promise<typeof import('../../services/ai')> | null = null;
+
+function loadAIService() {
+  aiServicePromise ??= import('../../services/ai');
+  return aiServicePromise;
+}
+
+function PromptSourceValue({ source }: { source: string }) {
+  const safeHref = resolvePromptMarkdownHref(source);
+
+  if (!safeHref) {
+    return <span className="text-foreground/90">{source}</span>;
+  }
+
+  return (
+    <a
+      href={safeHref}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="text-primary hover:underline flex items-center gap-1 inline-flex"
+    >
+      <span className="truncate max-w-full">{source}</span>
+    </a>
+  );
+}
 
 function escapeRegExp(str: string) {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -121,75 +147,185 @@ function renderHighlightedText(text: string, terms: string[], highlightClassName
   });
 }
 
-function renderHighlightedChildren(children: any, terms: string[], highlightClassName: string, skipTypes: any[]) {
-  return Children.map(children, (child) => {
-    if (typeof child === 'string') {
-      return renderHighlightedText(child, terms, highlightClassName);
-    }
-
-    if (!isValidElement(child)) return child;
-
-    if (skipTypes.includes(child.type)) return child;
-
-    const props = (child.props ?? {}) as any;
-    const nextChildren = renderHighlightedChildren(props.children, terms, highlightClassName, skipTypes);
-    return cloneElement(child as any, { ...props, children: nextChildren });
-  });
-}
-
 // Prompt card component (compact version) - wrapped with React.memo for performance
 // Prompt 卡片组件（紧凑版本）- 使用 React.memo 包装以提升性能
-const PromptCard = memo(function PromptCard({
+export const PromptCard = memo(function PromptCard({
   prompt,
+  depth,
+  childCount,
+  parentTitle,
+  isCollapsed,
   isSelected,
+  isDragging,
+  isDropTarget,
+  dropPosition,
   onSelect,
   onContextMenu,
+  onDragStart,
+  onDragEnd,
+  onDragOver,
+  onDragEnter,
+  onDragLeave,
+  onDrop,
+  onToggleCollapse,
   highlightTerms
 }: {
   prompt: Prompt;
+  depth: number;
+  childCount: number;
+  parentTitle?: string;
+  isCollapsed: boolean;
   isSelected: boolean;
+  isDragging: boolean;
+  isDropTarget: boolean;
+  dropPosition: PromptDropPosition | null;
   onSelect: (e: React.MouseEvent) => void;
   onContextMenu: (e: React.MouseEvent) => void;
+  onDragStart: (e: ReactDragEvent<HTMLDivElement>) => void;
+  onDragEnd: (e: ReactDragEvent<HTMLDivElement>) => void;
+  onDragOver: (e: ReactDragEvent<HTMLDivElement>) => void;
+  onDragEnter: (e: ReactDragEvent<HTMLDivElement>) => void;
+  onDragLeave: (e: ReactDragEvent<HTMLDivElement>) => void;
+  onDrop: (e: ReactDragEvent<HTMLDivElement>) => void;
+  onToggleCollapse: () => void;
   highlightTerms: string[];
 }) {
+  const { t } = useTranslation();
   const highlightClassName = isSelected
     ? 'bg-white/20 text-white rounded px-0.5'
     : 'bg-primary/15 text-primary rounded px-0.5';
+  const hierarchyTone = isSelected ? 'text-white/75 border-white/20 bg-white/10' : 'text-muted-foreground border-border/70 bg-muted/40';
+  const showDropBadge = Boolean(isDropTarget && dropPosition);
+  const canCollapse = childCount > 0;
+  const depthIndent = Math.min(Math.max(depth, 0), 5) * 12;
+  const parentChipIndent = depthIndent + 18;
 
   return (
     <div
+      role="button"
+      tabIndex={0}
+      draggable
+      aria-pressed={isSelected}
       onClick={onSelect}
+      onKeyDown={(event) => {
+        if (event.key !== 'Enter' && event.key !== ' ') {
+          return;
+        }
+
+        event.preventDefault();
+        onSelect(event as unknown as React.MouseEvent);
+      }}
       onContextMenu={onContextMenu}
+      onDragStart={onDragStart}
+      onDragEnd={onDragEnd}
+      onDragOver={onDragOver}
+      onDragEnter={onDragEnter}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
       className={`
-        w-full text-left px-3 py-2.5 rounded-lg cursor-pointer
+        w-full text-left px-3 py-2.5 rounded-lg cursor-pointer relative
         transition-all duration-base animate-in fade-in slide-in-from-left-2
+        outline-none focus-visible:ring-2 focus-visible:ring-primary/40
         ${isSelected
           ? 'bg-primary text-white'
-          : 'prompt-list-card bg-card hover:bg-accent'
+          : isDropTarget && dropPosition === 'inside'
+            ? 'prompt-list-card bg-primary/10'
+            : 'prompt-list-card bg-card hover:bg-accent'
         }
+        ${isDragging ? 'opacity-50' : ''}
+        ${isDropTarget && dropPosition === 'inside' ? 'ring-2 ring-primary/40 ring-inset' : ''}
+        ${isDropTarget && dropPosition === 'before' ? 'border-t-2 border-t-primary' : ''}
+        ${isDropTarget && dropPosition === 'after' ? 'border-b-2 border-b-primary' : ''}
+        ${depth > 0 && !isSelected ? 'bg-primary/[0.03]' : ''}
       `}
     >
       <div className="flex items-center justify-between gap-2">
-        <div className="flex items-center gap-1.5 min-w-0 flex-1">
-          {prompt.isPinned && (
-            <PinIcon className={`w-3 h-3 flex-shrink-0 ${isSelected ? 'text-white' : 'text-primary'}`} />
-          )}
-          {/* Prompt type icon - only show for image/media type */}
-          {prompt.promptType === 'image' && (
-            <ImageIcon className={`w-3 h-3 flex-shrink-0 ${isSelected ? 'text-white/70' : 'text-blue-500'}`} />
-          )}
+        <div
+          data-testid="prompt-card-title-row"
+          className="flex min-w-0 flex-1 items-center gap-1"
+          style={{ paddingLeft: `${depthIndent}px` }}
+        >
+          <GripVerticalIcon
+            aria-hidden="true"
+            className={`h-3.5 w-3.5 shrink-0 cursor-grab ${isSelected ? 'text-white/65' : 'text-muted-foreground/55'}`}
+          />
           <h3
-            className="font-medium text-sm leading-snug break-words line-clamp-2"
+            data-testid="prompt-card-title"
+            className="min-w-0 flex-1 break-words text-sm font-medium leading-snug line-clamp-2"
             title={prompt.title}
           >
             {renderHighlightedText(prompt.title, highlightTerms, highlightClassName)}
           </h3>
         </div>
-        {prompt.isFavorite && (
-          <StarIcon className={`w-3.5 h-3.5 flex-shrink-0 ${isSelected ? 'fill-white text-white' : 'fill-yellow-400 text-yellow-400'
-            }`} />
-        )}
+        <div className="flex flex-shrink-0 items-center gap-1">
+          {showDropBadge && (
+            <span className={`inline-flex items-center rounded border px-1.5 py-0.5 ${hierarchyTone}`}>
+              {dropPosition === 'inside' ? (
+                <CornerDownRightIcon aria-hidden="true" className="h-3 w-3" />
+              ) : (
+                <GitBranchIcon aria-hidden="true" className="h-3 w-3" />
+              )}
+            </span>
+          )}
+          {childCount > 0 && (
+            <button
+              type="button"
+              data-testid="prompt-card-collapse-toggle"
+              aria-label={t(isCollapsed ? 'prompt.expandPrompt' : 'prompt.collapsePrompt', {
+                title: prompt.title,
+              })}
+              title={t(isCollapsed ? 'prompt.expandPrompt' : 'prompt.collapsePrompt', {
+                title: prompt.title,
+              })}
+              onClick={(event) => {
+                event.stopPropagation();
+                onToggleCollapse();
+              }}
+              className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[11px] leading-none transition-colors ${hierarchyTone} ${
+                isSelected ? 'hover:bg-white/15' : 'hover:bg-accent hover:text-foreground'
+              }`}
+            >
+              {isCollapsed ? (
+                <ChevronRightIcon aria-hidden="true" className="h-3 w-3" />
+              ) : (
+                <ChevronDownIcon aria-hidden="true" className="h-3 w-3" />
+              )}
+              <GitBranchIcon aria-hidden="true" className="h-3 w-3" />
+              {t('prompt.childPromptCountShort', { count: childCount })}
+            </button>
+          )}
+          {prompt.isPinned && (
+            <PinIcon
+              aria-hidden="true"
+              className={`w-3.5 h-3.5 ${isSelected ? 'text-white' : 'text-primary'}`}
+            />
+          )}
+          {prompt.promptType === 'image' && (
+            <ImageIcon
+              aria-hidden="true"
+              className={`w-3.5 h-3.5 ${isSelected ? 'text-white/70' : 'text-blue-500'}`}
+            />
+          )}
+          {prompt.isFavorite && (
+            <StarIcon
+              aria-hidden="true"
+              className={`w-3.5 h-3.5 ${isSelected ? 'fill-white text-white' : 'fill-yellow-400 text-yellow-400'
+                }`}
+            />
+          )}
+        </div>
       </div>
+      {parentTitle && (
+        <div
+          data-testid="prompt-card-parent-chip"
+          className={`mt-1 inline-flex max-w-full items-center gap-1 rounded border px-1.5 py-0.5 text-[11px] leading-none ${hierarchyTone}`}
+          style={{ marginLeft: `${parentChipIndent}px` }}
+        >
+          <CornerDownRightIcon aria-hidden="true" className="h-3 w-3 shrink-0" />
+          <span className="shrink-0">{t('prompt.parentPrompt')}</span>
+          <span className="truncate">{parentTitle}</span>
+        </div>
+      )}
       {prompt.description && (
         <p className={`text-xs line-clamp-2 break-words mt-0.5 ${isSelected ? 'text-white/70' : 'text-muted-foreground'
           }`}>
@@ -206,6 +342,11 @@ interface VirtualizedPromptListProps {
   highlightTerms: string[];
   onSelect: (prompt: Prompt, event: React.MouseEvent) => void;
   onContextMenu: (event: React.MouseEvent, prompt: Prompt) => void;
+  onMovePrompt: (
+    promptId: string,
+    newParentId: string | null,
+    newOrder: number,
+  ) => Promise<void> | void;
 }
 
 /**
@@ -237,15 +378,29 @@ const VirtualizedPromptList = memo(function VirtualizedPromptList({
   highlightTerms,
   onSelect,
   onContextMenu,
+  onMovePrompt,
 }: VirtualizedPromptListProps) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const [draggingId, setDraggingId] = useState<string | null>(null);
+  const [dropTargetId, setDropTargetId] = useState<string | null>(null);
+  const [dropPosition, setDropPosition] = useState<PromptDropPosition | null>(null);
+  const [collapsedPromptIds, setCollapsedPromptIds] = useState<Set<string>>(() => new Set());
+  const effectiveCollapsedPromptIds = useMemo(
+    () => (highlightTerms.length > 0 ? new Set<string>() : collapsedPromptIds),
+    [collapsedPromptIds, highlightTerms.length],
+  );
+  const treeItems = useMemo(
+    () => flattenPromptTree(prompts, effectiveCollapsedPromptIds),
+    [effectiveCollapsedPromptIds, prompts],
+  );
+  const hierarchyMeta = useMemo(() => getPromptHierarchyMeta(prompts), [prompts]);
 
   const rowVirtualizer = useVirtualizer({
-    count: prompts.length,
+    count: treeItems.length,
     getScrollElement: () => scrollRef.current,
     estimateSize: () => PROMPT_CARD_ESTIMATED_HEIGHT,
     overscan: 8,
-    getItemKey: (index) => prompts[index]?.id ?? `__missing-${index}`,
+    getItemKey: (index) => treeItems[index]?.prompt.id ?? `__missing-${index}`,
   });
 
   const virtualItems = rowVirtualizer.getVirtualItems();
@@ -261,6 +416,122 @@ const VirtualizedPromptList = memo(function VirtualizedPromptList({
   const LIST_PADDING_TOP = 12;
   const LIST_PADDING_BOTTOM = 12;
 
+  const resetDropState = useCallback(() => {
+    setDraggingId(null);
+    setDropTargetId(null);
+    setDropPosition(null);
+  }, []);
+
+  const togglePromptCollapse = useCallback((promptId: string) => {
+    setCollapsedPromptIds((current) => {
+      const next = new Set(current);
+      if (next.has(promptId)) {
+        next.delete(promptId);
+      } else {
+        next.add(promptId);
+      }
+      return next;
+    });
+  }, []);
+
+  useEffect(() => {
+    const promptIds = new Set(prompts.map((prompt) => prompt.id));
+    setCollapsedPromptIds((current) => {
+      const next = new Set([...current].filter((promptId) => promptIds.has(promptId)));
+      return next.size === current.size ? current : next;
+    });
+  }, [prompts]);
+
+  const handleDragStart = useCallback(
+    (event: ReactDragEvent<HTMLDivElement>, promptId: string) => {
+      setDraggingId(promptId);
+      setDropTargetId(null);
+      setDropPosition(null);
+      event.dataTransfer.effectAllowed = 'move';
+      event.dataTransfer.setData('application/x-prompthub-prompt-id', promptId);
+      event.dataTransfer.setData('text/plain', promptId);
+    },
+    [],
+  );
+
+  const updateDropTarget = useCallback(
+    (event: ReactDragEvent<HTMLDivElement>, targetPromptId: string) => {
+      event.preventDefault();
+      event.dataTransfer.dropEffect = 'move';
+
+      const sourcePromptId =
+        draggingId ||
+        event.dataTransfer.getData('application/x-prompthub-prompt-id') ||
+        event.dataTransfer.getData('text/plain');
+      if (!sourcePromptId || sourcePromptId === targetPromptId) {
+        setDropTargetId(null);
+        setDropPosition(null);
+        return;
+      }
+
+      const nextDropPosition = getPromptDropPosition(
+        event.clientY,
+        event.currentTarget.getBoundingClientRect(),
+      );
+      const moveTarget = getPromptMoveTarget(
+        prompts,
+        sourcePromptId,
+        targetPromptId,
+        nextDropPosition,
+      );
+
+      if (!moveTarget) {
+        setDropTargetId(null);
+        setDropPosition(null);
+        return;
+      }
+
+      setDropTargetId(targetPromptId);
+      setDropPosition(nextDropPosition);
+    },
+    [draggingId, prompts],
+  );
+
+  const handleDragLeave = useCallback((event: ReactDragEvent<HTMLDivElement>) => {
+    const nextTarget = event.relatedTarget;
+    if (nextTarget instanceof Node && event.currentTarget.contains(nextTarget)) {
+      return;
+    }
+
+    setDropTargetId(null);
+    setDropPosition(null);
+  }, []);
+
+  const handleDrop = useCallback(
+    async (event: ReactDragEvent<HTMLDivElement>, targetPromptId: string) => {
+      event.preventDefault();
+
+      const sourcePromptId =
+        draggingId ||
+        event.dataTransfer.getData('application/x-prompthub-prompt-id') ||
+        event.dataTransfer.getData('text/plain');
+      if (!sourcePromptId || sourcePromptId === targetPromptId || !dropPosition) {
+        resetDropState();
+        return;
+      }
+
+      const moveTarget = getPromptMoveTarget(
+        prompts,
+        sourcePromptId,
+        targetPromptId,
+        dropPosition,
+      );
+      resetDropState();
+
+      if (!moveTarget) {
+        return;
+      }
+
+      await onMovePrompt(sourcePromptId, moveTarget.parentId, moveTarget.order);
+    },
+    [draggingId, dropPosition, onMovePrompt, prompts, resetDropState],
+  );
+
   return (
     <div ref={scrollRef} className="flex-1 overflow-y-auto">
       <div
@@ -270,8 +541,9 @@ const VirtualizedPromptList = memo(function VirtualizedPromptList({
         }}
       >
         {virtualItems.map((virtualRow) => {
-          const prompt = prompts[virtualRow.index];
-          if (!prompt) return null;
+          const item = treeItems[virtualRow.index];
+          if (!item) return null;
+          const { prompt, depth } = item;
           return (
             <div
               key={virtualRow.key}
@@ -288,9 +560,23 @@ const VirtualizedPromptList = memo(function VirtualizedPromptList({
             >
               <PromptCard
                 prompt={prompt}
+                depth={depth}
+                childCount={hierarchyMeta.childCountById.get(prompt.id) ?? 0}
+                parentTitle={hierarchyMeta.parentTitleById.get(prompt.id)}
+                isCollapsed={effectiveCollapsedPromptIds.has(prompt.id)}
                 isSelected={selectedPromptIdSet.has(prompt.id)}
+                isDragging={draggingId === prompt.id}
+                isDropTarget={dropTargetId === prompt.id}
+                dropPosition={dropTargetId === prompt.id ? dropPosition : null}
                 onSelect={(e) => onSelect(prompt, e)}
                 onContextMenu={(e) => onContextMenu(e, prompt)}
+                onDragStart={(event) => handleDragStart(event, prompt.id)}
+                onDragEnd={resetDropState}
+                onDragOver={(event) => updateDropTarget(event, prompt.id)}
+                onDragEnter={(event) => updateDropTarget(event, prompt.id)}
+                onDragLeave={handleDragLeave}
+                onDrop={(event) => handleDrop(event, prompt.id)}
+                onToggleCollapse={() => togglePromptCollapse(prompt.id)}
                 highlightTerms={highlightTerms}
               />
             </div>
@@ -303,11 +589,12 @@ const VirtualizedPromptList = memo(function VirtualizedPromptList({
 
 type DetailInlineEditDraft = {
   title: string;
+  description: string;
   systemPrompt: string;
   userPrompt: string;
 };
 
-type DetailInlineEditField = 'title' | 'systemPrompt' | 'userPrompt';
+type DetailInlineEditField = 'title' | 'description' | 'systemPrompt' | 'userPrompt';
 
 function createDetailInlineEditDraft(
   prompt: Prompt,
@@ -315,6 +602,7 @@ function createDetailInlineEditDraft(
 ): DetailInlineEditDraft {
   return {
     title: prompt.title,
+    description: prompt.description ?? '',
     systemPrompt: showEnglish ? (prompt.systemPromptEn || prompt.systemPrompt || '') : (prompt.systemPrompt || ''),
     userPrompt: showEnglish ? (prompt.userPromptEn || prompt.userPrompt) : prompt.userPrompt,
   };
@@ -341,6 +629,14 @@ export function MainContent() {
     return <Suspense fallback={loadingFallback}><RulesManager /></Suspense>;
   }
 
+  if (appModule === 'mcp') {
+    return <Suspense fallback={loadingFallback}><McpManager /></Suspense>;
+  }
+
+  if (appModule === 'plugin') {
+    return <Suspense fallback={loadingFallback}><PluginManager /></Suspense>;
+  }
+
   return <PromptSkillMainContent />;
 }
 
@@ -350,13 +646,17 @@ function PromptSkillMainContent() {
   const selectedId = usePromptStore((state) => state.selectedId);
   const selectedIds = usePromptStore((state) => state.selectedIds);
   const lastSelectedId = usePromptStore((state) => state.lastSelectedId);
+  const relations = usePromptStore((state) => state.relations);
   const selectPrompt = usePromptStore((state) => state.selectPrompt);
   const setSelectedIds = usePromptStore((state) => state.setSelectedIds);
   const createPrompt = usePromptStore((state) => state.createPrompt);
+  const createRelation = usePromptStore((state) => state.createRelation);
   const toggleFavorite = usePromptStore((state) => state.toggleFavorite);
   const togglePinned = usePromptStore((state) => state.togglePinned);
   const deletePrompt = usePromptStore((state) => state.deletePrompt);
+  const deleteRelation = usePromptStore((state) => state.deleteRelation);
   const updatePrompt = usePromptStore((state) => state.updatePrompt);
+  const movePrompt = usePromptStore((state) => state.movePrompt);
   const searchQuery = usePromptStore((state) => state.searchQuery);
   const filterTags = usePromptStore((state) => state.filterTags);
   const toggleFilterTag = usePromptStore((state) => state.toggleFilterTag);
@@ -373,8 +673,8 @@ function PromptSkillMainContent() {
   const unlockedFolderIds = useFolderStore((state) => state.unlockedFolderIds);
   const folders = useFolderStore((state) => state.folders);
 
-  const [copied, setCopied] = useState(false);
-  const [shared, setShared] = useState(false);
+  const [copied, triggerCopied] = useTemporaryFlag(2000);
+  const [shared, triggerShared] = useTemporaryFlag(2000);
 
   const [selectedModelIds, setSelectedModelIds] = useState<string[]>([]);
   const [isVariableModalOpen, setIsVariableModalOpen] = useState(false);
@@ -392,7 +692,6 @@ function PromptSkillMainContent() {
   const [showEnglish, setShowEnglish] = useState(false);
   const [isTagDropActive, setIsTagDropActive] = useState(false);
   const promptTypeFilter = usePromptStore((state) => state.promptTypeFilter);
-  const setPromptTypeFilter = usePromptStore((state) => state.setPromptTypeFilter);
   const tagFilterMode = useSettingsStore((state) => state.tagFilterMode);
   const uiViewMode = useUIStore((state) => state.viewMode);
   const { showToast } = useToast();
@@ -492,8 +791,6 @@ function PromptSkillMainContent() {
   const currentState = selectedId ? promptTestStates[selectedId] : null;
   const isTestingAI = currentState?.isTestingAI || false;
   const isComparingModels = currentState?.isComparingModels || false;
-  const compareResults = currentState?.compareResults || null;
-  const compareError = currentState?.compareError || null;
 
   // Separate streaming state for real-time display (bypasses complex state updates)
   // 独立的流式状态，用于实时显示（绕过复杂的状态更新）
@@ -597,15 +894,30 @@ function PromptSkillMainContent() {
   const aiModel = useSettingsStore((state) => state.aiModel);
   const aiModels = useSettingsStore((state) => state.aiModels);
   const scenarioModelDefaults = useSettingsStore((state) => state.scenarioModelDefaults);
+  const modelRouteDefaults = useSettingsStore((state) => state.modelRouteDefaults);
   const showCopyNotification = useSettingsStore((state) => state.showCopyNotification);
 
   const defaultChatModel = useMemo(() => {
-    return resolveScenarioModel(aiModels, scenarioModelDefaults, 'promptTest', 'chat');
-  }, [aiModels, scenarioModelDefaults]);
+    return resolveScenarioModel(
+      aiModels,
+      scenarioModelDefaults,
+      'promptTest',
+      'chat',
+      undefined,
+      modelRouteDefaults,
+    );
+  }, [aiModels, modelRouteDefaults, scenarioModelDefaults]);
 
   const defaultImageModel = useMemo(() => {
-    return resolveScenarioModel(aiModels, scenarioModelDefaults, 'imageTest', 'image');
-  }, [aiModels, scenarioModelDefaults]);
+    return resolveScenarioModel(
+      aiModels,
+      scenarioModelDefaults,
+      'imageTest',
+      'image',
+      undefined,
+      modelRouteDefaults,
+    );
+  }, [aiModels, modelRouteDefaults, scenarioModelDefaults]);
 
   const compareModels = useMemo(() => {
     const isImagePrompt = prompts.find((p) => p.id === selectedId)?.promptType === 'image';
@@ -649,7 +961,7 @@ function PromptSkillMainContent() {
     };
   }, [defaultChatModel, aiProvider, aiApiProtocol, aiApiKey, aiApiUrl, aiModel]);
 
-  const canRunSingleAiTest = !!((singleChatConfig.apiKey && singleChatConfig.apiUrl && singleChatConfig.model) || 
+  const canRunSingleAiTest = !!((singleChatConfig.apiKey && singleChatConfig.apiUrl && singleChatConfig.model) ||
     (defaultImageModel && defaultImageModel.apiKey && defaultImageModel.apiUrl && defaultImageModel.model));
 
   useEffect(() => {
@@ -658,62 +970,7 @@ function PromptSkillMainContent() {
     );
   }, [renderMarkdownPref]);
 
-  const sanitizeSchema: any = useMemo(() => {
-    const schema = { ...defaultSchema, attributes: { ...defaultSchema.attributes } };
-    schema.attributes.code = [...(schema.attributes.code || []), ['className']];
-    schema.attributes.span = [...(schema.attributes.span || []), ['className']];
-    schema.attributes.pre = [...(schema.attributes.pre || []), ['className']];
-    return schema;
-  }, []);
-
-  const rehypePlugins = useMemo(
-    () => [
-      [rehypeHighlight, { ignoreMissing: true }] as any,
-      [rehypeSanitize, sanitizeSchema] as any,
-    ],
-    [sanitizeSchema],
-  );
-
   const highlightClassName = useMemo(() => 'bg-primary/15 text-primary rounded px-0.5', []);
-
-  const markdownComponents = useMemo(() => {
-    const Code = (props: any) => <code className="px-1 py-0.5 rounded bg-muted font-mono text-[13px]" {...props} />;
-    const Pre = (props: any) => (
-      <pre className="p-3 rounded-lg bg-muted overflow-x-auto text-[13px] leading-relaxed" {...props} />
-    );
-    const skipTypes = [Code, Pre];
-
-    const withHighlight = (Tag: any, className: string) => (props: any) => (
-      <Tag className={className} {...props}>
-        {renderHighlightedChildren(props.children, highlightTerms, highlightClassName, skipTypes)}
-      </Tag>
-    );
-
-    return {
-      h1: withHighlight('h1', 'text-2xl font-bold mb-4 text-foreground'),
-      h2: withHighlight('h2', 'text-xl font-semibold mb-3 mt-5 text-foreground'),
-      h3: withHighlight('h3', 'text-lg font-semibold mb-3 mt-4 text-foreground'),
-      h4: withHighlight('h4', 'text-base font-semibold mb-2 mt-3 text-foreground'),
-      p: withHighlight('p', 'mb-3 leading-relaxed text-foreground/90'),
-      ul: withHighlight('ul', 'list-disc pl-5 mb-3 space-y-1'),
-      ol: withHighlight('ol', 'list-decimal pl-5 mb-3 space-y-1'),
-      li: withHighlight('li', 'leading-relaxed'),
-      code: Code,
-      pre: Pre,
-      blockquote: withHighlight('blockquote', 'border-l-4 border-border pl-3 text-muted-foreground italic mb-3'),
-      hr: () => <hr className="my-4 border-border" />,
-      table: (props: any) => <table className="table-auto border-collapse w-full text-sm mb-3" {...props} />,
-      th: withHighlight('th', 'border border-border px-2 py-1 bg-muted text-left font-medium'),
-      td: withHighlight('td', 'border border-border px-2 py-1'),
-      a: (props: any) => (
-        <a className="text-primary hover:underline" {...props} target="_blank" rel="noreferrer">
-          {renderHighlightedChildren(props.children, highlightTerms, highlightClassName, skipTypes)}
-        </a>
-      ),
-      strong: withHighlight('strong', 'font-semibold text-foreground'),
-      em: withHighlight('em', 'italic text-foreground/90'),
-    };
-  }, [highlightTerms, highlightClassName]);
 
   const renderPromptContent = (content?: string) => {
     if (!content) {
@@ -724,49 +981,53 @@ function PromptSkillMainContent() {
       );
     }
 
+    const plainFallback = (
+      <div className="p-4 rounded-xl app-wallpaper-surface border border-border font-mono text-[14px] leading-relaxed whitespace-pre-wrap break-words">
+        {renderHighlightedText(content, highlightTerms, highlightClassName)}
+      </div>
+    );
+
     if (!renderMarkdownEnabled) {
-      return (
-        <div className="p-4 rounded-xl app-wallpaper-surface border border-border font-mono text-[14px] leading-relaxed whitespace-pre-wrap break-words">
-          {renderHighlightedText(content, highlightTerms, highlightClassName)}
-        </div>
-      );
+      return plainFallback;
     }
 
     return (
       <div className="p-4 rounded-xl app-wallpaper-surface border border-border text-[15px] leading-relaxed markdown-content space-y-3 break-words">
-        <ReactMarkdown
-          remarkPlugins={[remarkGfm]}
-          rehypePlugins={rehypePlugins}
-          components={markdownComponents}
-        >
-          {content}
-        </ReactMarkdown>
+        <Suspense fallback={plainFallback}>
+          <PromptMarkdownContent
+            content={content}
+            highlightTerms={highlightTerms}
+            highlightClassName={highlightClassName}
+          />
+        </Suspense>
       </div>
     );
   };
 
-  const renderAiResponseContent = (content?: string) => {
+  const renderInlineMarkdownContent = (content?: string) => {
     if (!content) {
       return null;
     }
 
+    const plainFallback = (
+      <div className="text-sm leading-relaxed whitespace-pre-wrap break-words">
+        {content}
+      </div>
+    );
+
     if (!renderMarkdownEnabled) {
-      return (
-        <div className="text-sm leading-relaxed whitespace-pre-wrap break-words">
-          {content}
-        </div>
-      );
+      return plainFallback;
     }
 
     return (
       <div className="text-[15px] leading-relaxed markdown-content space-y-3 break-words">
-        <ReactMarkdown
-          remarkPlugins={[remarkGfm]}
-          rehypePlugins={rehypePlugins}
-          components={markdownComponents}
-        >
-          {content}
-        </ReactMarkdown>
+        <Suspense fallback={plainFallback}>
+          <PromptMarkdownContent
+            content={content}
+            highlightTerms={highlightTerms}
+            highlightClassName={highlightClassName}
+          />
+        </Suspense>
       </div>
     );
   };
@@ -775,84 +1036,6 @@ function PromptSkillMainContent() {
     const next = !renderMarkdownEnabled;
     setRenderMarkdownEnabled(next);
     setRenderMarkdownPref(next);
-  };
-
-  const handleRestoreVersion = async (version: PromptVersion) => {
-    if (selectedPrompt) {
-      await updatePrompt(selectedPrompt.id, {
-        systemPrompt: version.systemPrompt,
-        userPrompt: version.userPrompt,
-      });
-      showToast(t('toast.restored'), 'success');
-    }
-  };
-
-  const formatAiTestImageSize = (bytes: number): string => {
-    if (bytes >= 1024 * 1024) {
-      return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-    }
-    return `${Math.max(1, Math.round(bytes / 1024))} KB`;
-  };
-
-  const readInlineAiTestImage = (file: File): Promise<VariableInputImageAttachment> => {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => {
-        if (typeof reader.result !== 'string') {
-          reject(new Error(t('prompt.aiTestImageReadFailed')));
-          return;
-        }
-
-        const commaIndex = reader.result.indexOf(',');
-        if (commaIndex === -1) {
-          reject(new Error(t('prompt.aiTestImageReadFailed')));
-          return;
-        }
-
-        resolve({
-          id: `${file.name}-${file.size}-${file.lastModified}-${Math.random().toString(36).slice(2, 8)}`,
-          name: file.name,
-          mimeType: file.type,
-          size: file.size,
-          dataUrl: reader.result,
-          base64: reader.result.slice(commaIndex + 1),
-        });
-      };
-      reader.onerror = () => reject(new Error(t('prompt.aiTestImageReadFailed')));
-      reader.readAsDataURL(file);
-    });
-  };
-
-  const handleInlineAiTestImageSelection = async (files: FileList | null) => {
-    if (!files || files.length === 0) return;
-
-    const remainingSlots = MAX_AI_TEST_IMAGES - inlineAiTestImages.length;
-    if (remainingSlots <= 0) {
-      showToast(t('prompt.aiTestImageLimit', { count: MAX_AI_TEST_IMAGES }), 'error');
-      return;
-    }
-
-    const acceptedFiles: File[] = [];
-    for (const file of Array.from(files).slice(0, remainingSlots)) {
-      if (!SUPPORTED_AI_TEST_IMAGE_MIME_TYPES.has(file.type)) {
-        showToast(t('prompt.aiTestImageUnsupported', { name: file.name }), 'error');
-        continue;
-      }
-      if (file.size > MAX_AI_TEST_IMAGE_BYTES) {
-        showToast(t('prompt.aiTestImageTooLarge', { name: file.name, size: formatAiTestImageSize(MAX_AI_TEST_IMAGE_BYTES) }), 'error');
-        continue;
-      }
-      acceptedFiles.push(file);
-    }
-
-    if (acceptedFiles.length === 0) return;
-
-    try {
-      const attachments = await Promise.all(acceptedFiles.map(readInlineAiTestImage));
-      setInlineAiTestImages((prev) => [...prev, ...attachments].slice(0, MAX_AI_TEST_IMAGES));
-    } catch (error) {
-      showToast(error instanceof Error ? error.message : t('prompt.aiTestImageReadFailed'), 'error');
-    }
   };
 
   const runAiTest = async (
@@ -894,8 +1077,8 @@ function PromptSkillMainContent() {
              throw new Error(t('prompt.mismatchImage') || 'Prompt type is Image but no Image Model configured');
          }
 
-         console.log('[MainContent] Image Prompt. Using model:', defaultImageModel.name || defaultImageModel.model);
          try {
+             const { generateImage } = await loadAIService();
              const result = await generateImage({
                  provider: defaultImageModel.provider,
                  apiProtocol: defaultImageModel.apiProtocol,
@@ -904,21 +1087,21 @@ function PromptSkillMainContent() {
                  model: defaultImageModel.model,
                  imageParams: defaultImageModel.imageParams
              } as any, userPrompt);
-             
+
              const imageUrl = result.data?.[0]?.url;
              const imageBase64 = result.data?.[0]?.b64_json;
-             
+
              if (imageUrl || imageBase64) {
                  const displayUrl = imageUrl || `data:image/png;base64,${imageBase64}`;
                  setIsAiResponseImage(true);
                  setAiResponse(displayUrl);
-                 
+
                  // Save generated image to prompt's images array
                  // 将生成的图片保存到 prompt 的预览图中
                  if (targetId) {
                      try {
                          let savedFileName: string | null = null;
-                         
+
                          if (imageUrl) {
                              // Download from URL
                              savedFileName = await (window.electron as any).downloadImage(imageUrl);
@@ -928,7 +1111,7 @@ function PromptSkillMainContent() {
                              const success = await (window.electron as any).saveImageBase64(fileName, imageBase64);
                              if (success) savedFileName = fileName;
                          }
-                         
+
                          if (savedFileName && currentPrompt) {
                              const updatedImages = [...(currentPrompt.images || []), savedFileName];
                              await updatePrompt(targetId, { images: updatedImages });
@@ -939,7 +1122,7 @@ function PromptSkillMainContent() {
                          // Still show the image even if saving failed
                      }
                  }
-                 return; 
+                 return;
              }
          } catch (e) {
              console.error("[MainContent] Image generation failed:", e);
@@ -967,13 +1150,10 @@ function PromptSkillMainContent() {
         throw new Error(t('toast.configAI'));
       }
 
+      const { buildMessagesFromPrompt, chatCompletion } = await loadAIService();
       const messages = buildMessagesFromPrompt(systemPrompt, userPrompt, undefined, imageAttachments);
       const useStream = !!singleChatConfig.chatParams?.stream;
       const useThinking = !!singleChatConfig.chatParams?.enableThinking;
-
-      // Debug: Log stream configuration / 调试：记录流式配置
-      console.log('[MainContent] AI Test - Stream:', useStream, 'Thinking:', useThinking);
-      console.log('[MainContent] chatParams:', singleChatConfig.chatParams);
 
       if (useStream) {
         // Start streaming mode - use independent state for real-time updates
@@ -1026,7 +1206,6 @@ function PromptSkillMainContent() {
             scheduleThinkingFlush();
           },
           onComplete: (fullContent, thinkingContent) => {
-            console.log(`[Stream UI] Complete!`);
             if (contentRafId !== null) {
               cancelAnimationFrame(contentRafId);
               contentRafId = null;
@@ -1089,12 +1268,12 @@ function PromptSkillMainContent() {
         imageParams: m.imageParams,
       }));
 
-    const messages = buildMessagesFromPrompt(systemPrompt, userPrompt, undefined, imageAttachments);
-
     setIsComparingModels(true);
     setCompareError(null);
 
     try {
+      const { buildMessagesFromPrompt, multiModelCompare } = await loadAIService();
+      const messages = buildMessagesFromPrompt(systemPrompt, userPrompt, undefined, imageAttachments);
       resetCompareBuffers();
       compareBuffersRef.current = Object.fromEntries(
         selectedConfigs.map((config) => [
@@ -1195,6 +1374,42 @@ function PromptSkillMainContent() {
   }, [lastSelectedId, selectPrompt, selectedId, visiblePrompts]);
 
   const selectedPrompt = prompts.find((p) => p.id === selectedId);
+  const promptById = useMemo(() => new Map(prompts.map((prompt) => [prompt.id, prompt])), [prompts]);
+  const selectedPromptRelations = useMemo(() => {
+    if (!selectedPrompt) {
+      return [];
+    }
+
+    return relations.filter(
+      (relation) =>
+        relation.sourcePromptId === selectedPrompt.id ||
+        relation.targetPromptId === selectedPrompt.id,
+    );
+  }, [relations, selectedPrompt]);
+  const selectedParentPrompt = useMemo(() => {
+    if (!selectedPrompt?.parentId) {
+      return null;
+    }
+
+    return promptById.get(selectedPrompt.parentId) ?? null;
+  }, [promptById, selectedPrompt?.parentId]);
+  const selectedChildPrompts = useMemo(() => {
+    if (!selectedPrompt) {
+      return [];
+    }
+
+    return prompts
+      .filter((prompt) => prompt.parentId === selectedPrompt.id)
+      .sort((left, right) => {
+        const byOrder = (left.order ?? 0) - (right.order ?? 0);
+        if (byOrder !== 0) return byOrder;
+        return left.title.localeCompare(right.title);
+      });
+  }, [prompts, selectedPrompt]);
+  const selectedRelationshipCount =
+    selectedPromptRelations.length +
+    (selectedParentPrompt ? 1 : 0) +
+    selectedChildPrompts.length;
 
   // Auto-select prompt language based on UI language (if English version exists)
   // 根据界面语言自动选择 Prompt 语言（如果有英文版本）
@@ -1217,14 +1432,17 @@ function PromptSkillMainContent() {
   const [quickRewritePrompt, setQuickRewritePrompt] = useState<Prompt | null>(null);
   const [isDetailInlineEditing, setIsDetailInlineEditing] = useState(false);
   const [isDetailInlineSaving, setIsDetailInlineSaving] = useState(false);
+  const [isDetailRelationshipsOpen, setIsDetailRelationshipsOpen] = useState(false);
   const [detailInlineActiveField, setDetailInlineActiveField] =
     useState<DetailInlineEditField>('title');
   const [detailInlineDraft, setDetailInlineDraft] = useState<DetailInlineEditDraft>({
     title: '',
+    description: '',
     systemPrompt: '',
     userPrompt: '',
   });
   const detailTitleInputRef = useRef<HTMLInputElement>(null);
+  const detailDescriptionInputRef = useRef<HTMLInputElement>(null);
   const detailSystemPromptTextareaRef = useRef<HTMLTextAreaElement>(null);
   const detailUserPromptTextareaRef = useRef<HTMLTextAreaElement>(null);
   // AI test modal state
@@ -1233,11 +1451,9 @@ function PromptSkillMainContent() {
   const [aiTestPrompt, setAiTestPrompt] = useState<Prompt | null>(null);
   const [aiTestInitialMode, setAiTestInitialMode] = useState<'single' | 'compare' | 'image'>('single');
   const [inlineAiTestImages, setInlineAiTestImages] = useState<VariableInputImageAttachment[]>([]);
-  const inlineAiTestImageInputRef = useRef<HTMLInputElement | null>(null);
   // AI response cache (for list view preview)
   // AI 响应缓存（用于列表视图预览）
   const [aiResponseCache, setAiResponseCache] = useState<Record<string, string>>({});
-  const setViewMode = usePromptStore((state) => state.setViewMode);
 
   const detailInlineCurrentValues = useMemo(() => {
     if (!selectedPrompt) {
@@ -1263,13 +1479,14 @@ function PromptSkillMainContent() {
   useEffect(() => {
     setIsDetailInlineEditing(false);
     setIsDetailInlineSaving(false);
+    setIsDetailRelationshipsOpen(false);
     setDetailInlineActiveField('title');
     setInlineAiTestImages([]);
   }, [selectedPrompt?.id]);
 
   useEffect(() => {
     if (!selectedPrompt) {
-      setDetailInlineDraft({ title: '', systemPrompt: '', userPrompt: '' });
+      setDetailInlineDraft({ title: '', description: '', systemPrompt: '', userPrompt: '' });
       return;
     }
     if (isDetailInlineEditing) {
@@ -1280,6 +1497,7 @@ function PromptSkillMainContent() {
     isDetailInlineEditing,
     selectedPrompt,
     selectedPrompt?.title,
+    selectedPrompt?.description,
     selectedPrompt?.userPrompt,
     selectedPrompt?.userPromptEn,
     showEnglish,
@@ -1295,6 +1513,11 @@ function PromptSkillMainContent() {
     }
     if (detailInlineActiveField === 'userPrompt') {
       detailUserPromptTextareaRef.current?.focus();
+      return;
+    }
+    if (detailInlineActiveField === 'description') {
+      detailDescriptionInputRef.current?.focus();
+      detailDescriptionInputRef.current?.select();
       return;
     }
     detailTitleInputRef.current?.focus();
@@ -1314,7 +1537,7 @@ function PromptSkillMainContent() {
     if (selectedPrompt) {
       setDetailInlineDraft(createDetailInlineEditDraft(selectedPrompt, showEnglish));
     } else {
-      setDetailInlineDraft({ title: '', systemPrompt: '', userPrompt: '' });
+      setDetailInlineDraft({ title: '', description: '', systemPrompt: '', userPrompt: '' });
     }
     setDetailInlineActiveField('title');
     setIsDetailInlineEditing(false);
@@ -1328,10 +1551,17 @@ function PromptSkillMainContent() {
 
     return (
       detailInlineDraft.title.trim() !== detailInlineCurrentValues.title.trim() ||
+      detailInlineDraft.description.trim() !== detailInlineCurrentValues.description.trim() ||
       detailInlineDraft.systemPrompt !== detailInlineCurrentValues.systemPrompt ||
       detailInlineDraft.userPrompt !== detailInlineCurrentValues.userPrompt
     );
-  }, [detailInlineCurrentValues, detailInlineDraft.title, detailInlineDraft.systemPrompt, detailInlineDraft.userPrompt]);
+  }, [
+    detailInlineCurrentValues,
+    detailInlineDraft.title,
+    detailInlineDraft.description,
+    detailInlineDraft.systemPrompt,
+    detailInlineDraft.userPrompt,
+  ]);
 
   const canSaveDetailInlineEdit = useMemo(() => {
     return (
@@ -1350,18 +1580,28 @@ function PromptSkillMainContent() {
   ]);
 
   const saveDetailInlineEdit = useCallback(async () => {
-    if (!selectedPrompt || !canSaveDetailInlineEdit) {
+    if (!selectedPrompt || !canSaveDetailInlineEdit || !detailInlineCurrentValues) {
       return;
     }
 
     const nextTitle = detailInlineDraft.title.trim();
+    const nextDescription = detailInlineDraft.description.trim();
     const nextSystemPrompt = detailInlineDraft.systemPrompt;
     const nextUserPrompt = detailInlineDraft.userPrompt;
-    const updateData: UpdatePromptDTO = {
-      title: nextTitle,
-    };
-    updateData[detailInlineSystemPromptField] = nextSystemPrompt;
-    updateData[detailInlineUserPromptField] = nextUserPrompt;
+    const updateData: UpdatePromptDTO = {};
+
+    if (nextTitle !== detailInlineCurrentValues.title.trim()) {
+      updateData.title = nextTitle;
+    }
+    if (nextDescription !== detailInlineCurrentValues.description.trim()) {
+      updateData.description = nextDescription;
+    }
+    if (nextSystemPrompt !== detailInlineCurrentValues.systemPrompt) {
+      updateData[detailInlineSystemPromptField] = nextSystemPrompt;
+    }
+    if (nextUserPrompt !== detailInlineCurrentValues.userPrompt) {
+      updateData[detailInlineUserPromptField] = nextUserPrompt;
+    }
 
     setIsDetailInlineSaving(true);
     try {
@@ -1377,7 +1617,9 @@ function PromptSkillMainContent() {
     }
   }, [
     canSaveDetailInlineEdit,
+    detailInlineCurrentValues,
     detailInlineDraft.title,
+    detailInlineDraft.description,
     detailInlineDraft.systemPrompt,
     detailInlineDraft.userPrompt,
     detailInlineSystemPromptField,
@@ -1396,6 +1638,12 @@ function PromptSkillMainContent() {
         return;
       }
 
+      if (event.key === 'Enter' && event.currentTarget.tagName === 'INPUT') {
+        event.preventDefault();
+        void saveDetailInlineEdit();
+        return;
+      }
+
       if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
         event.preventDefault();
         void saveDetailInlineEdit();
@@ -1409,19 +1657,12 @@ function PromptSkillMainContent() {
   const handleCopyPrompt = async (prompt: Prompt) => {
     const resolvedPrompt = resolvePromptContentByLanguage(prompt, showEnglish);
 
-    if (
-      hasUserDefinedPromptVariables(
-        resolvedPrompt.systemPrompt,
-        resolvedPrompt.userPrompt,
-      )
-    ) {
+    if (hasUserDefinedPromptVariables(undefined, resolvedPrompt.userPrompt)) {
       // 有变量，打开弹窗让用户填写
       setCopyPrompt(prompt);
       setIsCopyVariableModalOpen(true);
     } else {
-      // 没有变量，直接复制（包含 systemPrompt 和 userPrompt）
-      // No variables, copy directly (include both systemPrompt and userPrompt)
-      await navigator.clipboard.writeText(buildPromptCopyText(resolvedPrompt));
+      await copyTextToClipboard(buildPromptCopyText(resolvedPrompt));
       await incrementUsageCount(prompt.id);
       showToast(t('toast.copied'), 'success', showCopyNotification);
     }
@@ -1516,10 +1757,43 @@ function PromptSkillMainContent() {
 
     return pathMap;
   }, [folders, folderNameById]);
+  const detailFolderOptions = useMemo(
+    () => [
+      {
+        value: '',
+        label: (
+          <span className="flex min-w-0 items-center gap-2">
+	            <FolderIcon aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+            <span className="truncate">{t('prompt.noFolder')}</span>
+          </span>
+        ),
+        labelText: t('prompt.noFolder'),
+      },
+      ...flattenedFolders.map((folder) => {
+        const parentPath = folderPathById.get(folder.id);
+        const label = parentPath ? `${parentPath} / ${folder.name}` : folder.name;
 
-  const handleMovePrompt = useCallback(async (prompt: Prompt, folderId: string | undefined) => {
-    await updatePrompt(prompt.id, { folderId });
-    const folder = folderId ? folders.find((item) => item.id === folderId) : undefined;
+        return {
+          value: folder.id,
+          label: (
+            <span className="flex min-w-0 items-center gap-2">
+              <span className="flex h-4 w-4 shrink-0 items-center justify-center">
+                {renderFolderIcon(folder.icon)}
+              </span>
+              <span className="truncate">{label}</span>
+            </span>
+          ),
+          labelText: label,
+        };
+      }),
+    ],
+    [flattenedFolders, folderPathById, t],
+  );
+
+  const handleMovePrompt = useCallback(async (prompt: Prompt, folderId: string | null | undefined) => {
+    const nextFolderId = folderId ?? null;
+    await updatePrompt(prompt.id, { folderId: nextFolderId });
+    const folder = nextFolderId ? folders.find((item) => item.id === nextFolderId) : undefined;
     showToast(
       folder
         ? `${t('toast.movedToFolder')}「${folder.name}」`
@@ -1527,6 +1801,38 @@ function PromptSkillMainContent() {
       'success',
     );
   }, [folders, showToast, t, updatePrompt]);
+
+  const handleCreatePromptRelation = useCallback(async (data: CreatePromptRelationDTO) => {
+    try {
+      await createRelation(data);
+      showToast(
+        t('prompt.relationships.added', 'Relation added'),
+        'success',
+      );
+    } catch (error) {
+      console.error('Failed to create prompt relation:', error);
+      showToast(
+        t('prompt.relationships.addFailed', 'Failed to add relationship'),
+        'error',
+      );
+    }
+  }, [createRelation, showToast, t]);
+
+  const handleDeletePromptRelation = useCallback(async (relationId: string) => {
+    try {
+      await deleteRelation(relationId);
+      showToast(
+        t('prompt.relationships.removed', 'Relation removed'),
+        'success',
+      );
+    } catch (error) {
+      console.error('Failed to delete prompt relation:', error);
+      showToast(
+        t('prompt.relationships.removeFailed', 'Failed to remove relationship'),
+        'error',
+      );
+    }
+  }, [deleteRelation, showToast, t]);
 
   // View details - show modal
   // 查看详情 - 弹窗显示
@@ -1575,7 +1881,7 @@ function PromptSkillMainContent() {
       ...extractVariables(prompt.systemPrompt || ''),
       ...extractVariables(prompt.userPrompt),
     ].filter((v, i, arr) => arr.indexOf(v) === i);
-    
+
     const data = {
       name: prompt.title,
       description: prompt.description,
@@ -1588,16 +1894,15 @@ function PromptSkillMainContent() {
       source: 'prompthub',
       version: '1.0'
     };
-    
+
     const jsonStr = JSON.stringify(data, null, 2);
-    await navigator.clipboard.writeText(jsonStr);
-    
+    await copyTextToClipboard(jsonStr);
+
     const checksum = `${jsonStr.length}-${jsonStr.substring(0, 10)}`;
     sessionStorage.setItem('lastCopiedPromptSignature', checksum);
-    
+
     showToast(t('toast.copied'), 'success');
-    setShared(true);
-    setTimeout(() => setShared(false), 2000);
+    triggerShared();
   };
 
   // Context menu anchor (also used by table view)
@@ -1823,6 +2128,18 @@ function PromptSkillMainContent() {
     showToast(t('toast.batchDeleted'), 'success');
   };
 
+  const handleMovePromptInTree = useCallback(
+    async (promptId: string, newParentId: string | null, newOrder: number) => {
+      try {
+        await movePrompt(promptId, newParentId, newOrder);
+      } catch (error) {
+        console.error('Failed to move prompt in tree:', error);
+        showToast(t('prompt.relationships.moveFailed', 'Failed to move prompt'), 'error');
+      }
+    },
+    [movePrompt, showToast, t],
+  );
+
   // Memoize getViewClass to avoid re-creating the function on every render
   // 使用 useCallback 缓存 getViewClass，避免每次渲染都重新创建函数
   const getViewClass = useCallback((mode: ViewMode, layout: 'col' | 'row' = 'col') => {
@@ -1844,91 +2161,42 @@ function PromptSkillMainContent() {
         </Suspense>
       ) : (
       <>
-      {/* List view mode */}
-      {/* 列表视图模式 */}
-      <div
-        className={getViewClass('list')}
-      >
-
-
-        {/* Top: sort + view switch */}
-        {/* 顶部：排序 + 视图切换 */}
-        <PromptListHeader count={sortedPrompts.length} />
-
-        {/* Table view */}
-        {/* 表格视图 */}
-        <div className="flex-1 overflow-hidden">
-          <Suspense fallback={loadingFallback}>
-            <PromptTableView
-              prompts={sortedPrompts}
-              highlightTerms={highlightTerms}
-              onSelect={(id) => selectPrompt(id)}
-              onToggleFavorite={toggleFavorite}
-              onCopy={handleCopyPrompt}
-              onEdit={(prompt) => setEditingPrompt(prompt)}
-              onDelete={handleDeletePrompt}
-              onAiTest={handleAiTestFromTable}
-              onVersionHistory={handleVersionHistory}
-              onViewDetail={handleViewDetail}
-              aiResults={aiResponseCache}
-              onBatchFavorite={handleBatchFavorite}
-              onBatchMove={handleBatchMove}
-              onBatchDelete={handleBatchDelete}
-              onContextMenu={handleContextMenu}
-            />
-          </Suspense>
-        </div>
-      </div>
-
-      {/* Gallery view */}
-      {/* Gallery 视图 */}
-      <div
-        className={getViewClass('gallery')}
-      >
-        <PromptListHeader count={sortedPrompts.length} />
-        {viewMode === 'gallery' && (
-          <Suspense fallback={loadingFallback}>
-            <PromptGalleryView
-              prompts={visiblePrompts}
-              highlightTerms={highlightTerms}
-              onSelect={(id) => selectPrompt(id)}
-              onToggleFavorite={toggleFavorite}
-              onCopy={handleCopyPrompt}
-              onEdit={(prompt) => setEditingPrompt(prompt)}
-              onDelete={handleDeletePrompt}
-              onAiTest={handleAiTestFromTable}
-              onVersionHistory={handleVersionHistory}
-              onViewDetail={handleViewDetail}
-              onContextMenu={handleContextMenu}
-            />
-          </Suspense>
-        )}
-      </div>
-
-      {/* Kanban view */}
-      {/* 看板视图 */}
-      <div
-        className={getViewClass('kanban')}
-      >
-        <PromptListHeader count={sortedPrompts.length} />
-        {viewMode === 'kanban' && (
-          <Suspense fallback={loadingFallback}>
-            <PromptKanbanView
-              prompts={visiblePrompts}
-              highlightTerms={highlightTerms}
-              onSelect={(id) => selectPrompt(id)}
-              onToggleFavorite={toggleFavorite}
-              onCopy={handleCopyPrompt}
-              onEdit={(prompt) => setEditingPrompt(prompt)}
-              onDelete={handleDeletePrompt}
-              onAiTest={handleAiTestFromTable}
-              onVersionHistory={handleVersionHistory}
-              onViewDetail={handleViewDetail}
-              onContextMenu={handleContextMenu}
-            />
-          </Suspense>
-        )}
-      </div>
+      <PromptViewContainers
+        viewMode={viewMode}
+        getViewClass={getViewClass}
+        prompts={prompts}
+        relations={relations}
+        selectedId={selectedId}
+        onGraphSelectPrompt={(promptId) => {
+          const prompt = promptById.get(promptId);
+          selectPrompt(promptId);
+          if (prompt) {
+            setDetailPrompt(prompt);
+            setIsDetailModalOpen(true);
+          }
+        }}
+        sortedPrompts={sortedPrompts}
+        visiblePrompts={visiblePrompts}
+        highlightTerms={highlightTerms}
+        cardActions={{
+          onSelect: (id) => selectPrompt(id),
+          onToggleFavorite: toggleFavorite,
+          onCopy: handleCopyPrompt,
+          onEdit: (prompt) => setEditingPrompt(prompt),
+          onDelete: handleDeletePrompt,
+          onAiTest: handleAiTestFromTable,
+          onVersionHistory: handleVersionHistory,
+          onViewDetail: handleViewDetail,
+          onContextMenu: handleContextMenu,
+        }}
+        tableActions={{
+          aiResults: aiResponseCache,
+          onBatchFavorite: handleBatchFavorite,
+          onBatchMove: handleBatchMove,
+          onBatchDelete: handleBatchDelete,
+          onMovePrompt: handleMovePromptInTree,
+        }}
+      />
 
       {/* Card view mode: two-column layout */}
       {/* 卡片视图模式：左右分栏 */}
@@ -1963,6 +2231,7 @@ function PromptSkillMainContent() {
               highlightTerms={highlightTerms}
               onSelect={handleSelectPrompt}
               onContextMenu={handleContextMenu}
+              onMovePrompt={handleMovePromptInTree}
             />
           )}
           {/* Drag-to-resize handle for the prompt list pane (#119) */}
@@ -1985,11 +2254,12 @@ function PromptSkillMainContent() {
           {selectedPrompt ? (
             <div key={selectedPrompt.id} className="flex-1 flex flex-col overflow-hidden animate-in fade-in slide-in-from-right-3 duration-base">
               <div className="flex-1 overflow-y-auto">
-                <div className="max-w-5xl mx-auto px-6 py-4">
+                <div className="w-full px-8 py-4">
                   {/* Title section */}
                   {/* 标题区域 */}
-                  <div className="flex items-start justify-between mb-3">
-                    <div className="flex-1">
+                  <div className="mb-3">
+                    <div className="flex items-start justify-between gap-4">
+                      <div className="min-w-0 flex-1">
                       {isDetailInlineEditing ? (
                         <input
                           ref={detailTitleInputRef}
@@ -2004,7 +2274,7 @@ function PromptSkillMainContent() {
                           }}
                           onKeyDown={handleDetailInlineEditKeyDown}
                           placeholder={t('prompt.titlePlaceholder')}
-                          className="h-12 w-full bg-transparent border-0 p-0 text-xl font-bold text-foreground placeholder:text-muted-foreground/60 focus:outline-none"
+                          className="h-10 w-full rounded-xl border border-border/70 bg-card px-3 text-xl font-bold text-foreground shadow-sm outline-none appearance-none placeholder:text-muted-foreground/60 focus:border-primary/40 focus:ring-2 focus:ring-primary/20"
                         />
                       ) : (
                         <h2
@@ -2014,58 +2284,71 @@ function PromptSkillMainContent() {
                           {selectedPrompt.title}
                         </h2>
                       )}
-                      {selectedPrompt.description && (
-                        <p className="text-sm text-muted-foreground">{selectedPrompt.description}</p>
-                      )}
-                    </div>
-                    <div className="flex items-center gap-1">
-                      <button
-                        onClick={() => toggleFavorite(selectedPrompt.id)}
-                        className={`
-                      p-2.5 rounded-xl transition-all duration-base
-                      ${selectedPrompt.isFavorite
+                      </div>
+	                      <div className="flex shrink-0 items-center gap-1">
+	                      <button
+	                        type="button"
+	                        onClick={() => toggleFavorite(selectedPrompt.id)}
+	                        aria-label={
+	                          selectedPrompt.isFavorite
+	                            ? t('prompt.removeFromFavorites')
+	                            : t('prompt.addToFavorites')
+	                        }
+	                        aria-pressed={selectedPrompt.isFavorite}
+	                        title={
+	                          selectedPrompt.isFavorite
+	                            ? t('prompt.removeFromFavorites')
+	                            : t('prompt.addToFavorites')
+	                        }
+	                        className={`
+	                      p-2.5 rounded-xl transition-all duration-base
+	                      ${selectedPrompt.isFavorite
                             ? 'text-yellow-500 bg-yellow-500/10'
                             : 'text-muted-foreground hover:bg-accent hover:text-foreground'
                           }
-                      active:scale-press-in
-                    `}
-                      >
-                        <StarIcon className={`w-5 h-5 ${selectedPrompt.isFavorite ? 'fill-current' : ''}`} />
-                      </button>
+	                      active:scale-press-in
+	                    `}
+	                      >
+	                        <StarIcon aria-hidden="true" className={`w-5 h-5 ${selectedPrompt.isFavorite ? 'fill-current' : ''}`} />
+	                      </button>
                       <PromptQuickRewriteTrigger
                         onClick={() => setQuickRewritePrompt(selectedPrompt)}
                         className="p-2.5 rounded-xl text-muted-foreground hover:bg-accent hover:text-primary transition-all duration-base active:scale-press-in"
                       />
-                      <button
-                        onClick={() => handleSharePrompt(selectedPrompt)}
-                        className={`p-2.5 rounded-xl transition-all duration-base ${shared ? 'text-green-500 bg-green-500/10' : 'text-muted-foreground hover:bg-accent hover:text-foreground'} active:scale-press-in`}
-                        title={t('prompt.shareJSON', '分享为 JSON')}
-                      >
-                         {shared ? <CheckIcon className="w-5 h-5" /> : <Share2Icon className="w-5 h-5" />}
-                      </button>
+	                      <button
+	                        type="button"
+	                        onClick={() => handleSharePrompt(selectedPrompt)}
+	                        className={`p-2.5 rounded-xl transition-all duration-base ${shared ? 'text-green-500 bg-green-500/10' : 'text-muted-foreground hover:bg-accent hover:text-foreground'} active:scale-press-in`}
+	                        aria-label={t('prompt.shareJSON', '分享为 JSON')}
+	                        title={t('prompt.shareJSON', '分享为 JSON')}
+	                      >
+	                         {shared ? <CheckIcon aria-hidden="true" className="w-5 h-5" /> : <Share2Icon aria-hidden="true" className="w-5 h-5" />}
+	                      </button>
                       {isDetailInlineEditing ? (
                         <>
                           <button
                             type="button"
                             onClick={cancelDetailInlineEdit}
+                            aria-label={t('common.cancel')}
+                            title={t('common.cancel')}
                             disabled={isDetailInlineSaving}
-                            className="flex items-center gap-2 h-10 px-3 rounded-xl app-wallpaper-surface-strong border border-border text-sm font-medium hover:bg-accent/60 disabled:opacity-50 transition-colors"
+                            className="inline-flex h-9 w-9 items-center justify-center rounded-xl app-wallpaper-surface-strong border border-border text-muted-foreground hover:bg-accent/60 hover:text-foreground disabled:opacity-50 transition-colors"
                           >
-                            <XIcon className="w-4 h-4" />
-                            <span>{t('common.cancel')}</span>
+	                            <XIcon aria-hidden="true" className="w-4 h-4" />
                           </button>
                           <button
                             type="button"
                             onClick={() => void saveDetailInlineEdit()}
+                            aria-label={t('common.save')}
+                            title={t('common.save')}
                             disabled={!canSaveDetailInlineEdit}
-                            className="flex items-center gap-2 h-10 px-3 rounded-xl bg-primary text-white text-sm font-medium hover:bg-primary/90 disabled:opacity-50 transition-colors"
+                            className="inline-flex h-9 w-9 items-center justify-center rounded-xl bg-primary text-white hover:bg-primary/90 disabled:opacity-50 transition-colors"
                           >
                             {isDetailInlineSaving ? (
-                              <LoaderIcon className="w-4 h-4 animate-spin" />
-                            ) : (
-                              <SaveIcon className="w-4 h-4" />
+	                              <LoaderIcon aria-hidden="true" className="w-4 h-4 animate-spin" />
+	                            ) : (
+	                              <SaveIcon aria-hidden="true" className="w-4 h-4" />
                             )}
-                            <span>{t('common.save')}</span>
                           </button>
                         </>
                       ) : (
@@ -2076,23 +2359,76 @@ function PromptSkillMainContent() {
                           title={t('prompt.editPrompt')}
                           className="p-2.5 rounded-xl text-muted-foreground hover:bg-accent hover:text-foreground transition-all duration-base active:scale-press-in"
                         >
-                          <EditIcon className="w-5 h-5" />
+	                          <EditIcon aria-hidden="true" className="w-5 h-5" />
                         </button>
                       )}
+                      </div>
                     </div>
-                  </div>
+                    {isDetailInlineEditing ? (
+                      <PromptDescriptionInput
+                        value={detailInlineDraft.description}
+                        onChange={(nextDescription) =>
+                          setDetailInlineDraft((prev) => ({
+                            ...prev,
+                            description: nextDescription,
+                          }))
+                        }
+                        inputRef={detailDescriptionInputRef}
+                        onEditKeyDown={handleDetailInlineEditKeyDown}
+                        prompts={prompts}
+                        currentPromptId={selectedPrompt.id}
+                        placeholder={t('prompt.descriptionPlaceholder')}
+                        ariaLabel={t('prompt.description')}
+                        t={t}
+                      />
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => openDetailInlineEdit('description')}
+                        className={`mt-1 block w-full text-left text-sm transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded-md ${
+                          selectedPrompt.description
+                            ? 'text-muted-foreground'
+                            : 'text-muted-foreground/55'
+                        }`}
+                      >
+                        {selectedPrompt.description || t('prompt.addDescription')}
+                      </button>
+                    )}
+                    </div>
 
-                  {/* Metadata */}
-                  {/* 元信息 */}
-                  <div className="flex items-center gap-3 text-sm text-muted-foreground mb-4">
-                    <span className="flex items-center gap-1">
-                      <ClockIcon className="w-3.5 h-3.5" />
-                      {new Date(selectedPrompt.updatedAt).toLocaleString()}
-                    </span>
-                    <span className="px-2 py-0.5 rounded-md bg-accent text-accent-foreground text-xs font-medium">
-                      v{selectedPrompt.version}
-                    </span>
-                  </div>
+                  {/* Metadata + parent/child navigation */}
+                  {/* 元信息 + 父子导航 */}
+                  <PromptDetailMetadata
+                    prompt={selectedPrompt}
+                    parentPrompt={selectedParentPrompt}
+                    childPrompts={selectedChildPrompts}
+                    folderOptions={detailFolderOptions}
+                    relationshipCount={selectedRelationshipCount}
+                    isRelatedPromptsOpen={isDetailRelationshipsOpen}
+                    isRelatedPromptsDisabled={isDetailInlineEditing}
+                    t={t}
+                    onMoveToFolder={(prompt, folderId) => {
+                      void handleMovePrompt(prompt, folderId);
+                    }}
+                    onSelectPrompt={selectPrompt}
+                    onToggleRelatedPrompts={() =>
+                      setIsDetailRelationshipsOpen((open) => !open)
+                    }
+                  />
+
+                  {isDetailRelationshipsOpen && (
+                    <PromptRelationshipPanel
+                      currentPrompt={selectedPrompt}
+                      prompts={prompts}
+                      relations={selectedPromptRelations}
+                      relationshipCount={selectedRelationshipCount}
+                      onCreateRelation={handleCreatePromptRelation}
+                      onDeleteRelation={handleDeletePromptRelation}
+                      onSelectPrompt={(promptId) => selectPrompt(promptId)}
+                      disabled={isDetailInlineEditing}
+                      className="mb-4"
+                    />
+                  )}
 
                   {/* Images */}
                   {/* 图片 */}
@@ -2104,6 +2440,7 @@ function PromptSkillMainContent() {
                             <LocalImage
                               src={img}
                               alt={`image-${index}`}
+                              aria-label={t('prompt.previewReferenceImage', { index: index + 1 })}
                               className="max-w-[160px] max-h-[160px] object-cover hover:scale-105 transition-transform duration-smooth cursor-pointer"
                               fallbackClassName="w-[160px] h-[120px]"
                               onClick={() => setPreviewImage(img)}
@@ -2114,37 +2451,21 @@ function PromptSkillMainContent() {
                     </div>
                   )}
 
-                  {/* Prompt Type Badge / 类型标识 */}
-                  <div className="mb-4 space-y-2">
-                    <div className="flex flex-wrap items-center gap-1.5">
-                      <span className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium shadow-sm ${
-                        (selectedPrompt.promptType || 'text') === 'image'
-                          ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/50 dark:text-blue-300'
-                          : 'bg-green-100 text-green-700 dark:bg-green-900/50 dark:text-green-300'
-                      }`}>
-                        {(selectedPrompt.promptType || 'text') === 'image'
-                          ? <ImageIcon className="h-3 w-3" />
-                          : <MessageSquareTextIcon className="h-3 w-3" />
-                        }
-                        {(selectedPrompt.promptType || 'text') === 'image'
-                          ? t('prompt.typeImage', '绘图')
-                          : t('prompt.typeText', '文本')
-                        }
-                      </span>
-                    </div>
-
+                  {/* Tags / 标签 */}
+                  <div className="mb-4">
                     <div
                       data-testid="prompt-detail-tags-dropzone"
                       onDragOver={handleDetailTagDragOver}
                       onDrop={handleDetailTagDrop}
                       onDragLeave={handleDetailTagDragLeave}
-                      className={`flex min-h-[2.75rem] flex-wrap items-center gap-1.5 rounded-xl border px-1.5 py-1.5 transition-[background-color,border-color,box-shadow] ${isTagDropActive
+                      className={`flex min-h-[2.75rem] flex-wrap items-center gap-1.5 rounded-xl border py-1.5 pr-1.5 transition-[background-color,border-color,box-shadow] ${isTagDropActive
                         ? 'border-primary/25 bg-primary/6 shadow-[0_0_0_1px_rgba(59,130,246,0.18)]'
                         : 'border-transparent'
                       }`}
                     >
                       {selectedPrompt.tags.map((tag) => {
                         const isTagFiltered = filterTags.includes(tag);
+                        const removeTagLabel = `${t('prompt.removeTag', 'Remove tag').replace(/\s*\{\{tag\}\}/g, '')}: ${tag}`;
 
                         return (
                           <span
@@ -2163,20 +2484,20 @@ function PromptSkillMainContent() {
                                 : 'hover:bg-primary hover:text-white'
                               }`}
                             >
-                              <HashIcon className="h-3 w-3 shrink-0" />
+                              <HashIcon aria-hidden="true" className="h-3 w-3 shrink-0" />
                               <span className="max-w-[11rem] truncate">{tag}</span>
                             </button>
                             <button
                               type="button"
                               onClick={() => void handleDetailRemoveTag(tag)}
-                              title={t('prompt.removeTag', 'Remove tag')}
-                              aria-label={`${t('prompt.removeTag', 'Remove tag')}: ${tag}`}
+                              title={removeTagLabel}
+                              aria-label={removeTagLabel}
                               className={`inline-flex items-center justify-center rounded-r-full py-1.5 pl-1 pr-2 transition-colors focus-visible:outline-none focus-visible:ring-2 ${isTagFiltered
                                 ? 'text-white/85 hover:bg-primary/90 hover:text-white focus-visible:ring-primary-foreground/30'
                                 : 'text-muted-foreground hover:bg-destructive/10 hover:text-destructive focus-visible:ring-destructive/30'
                               }`}
                             >
-                              <XIcon className="h-3 w-3" />
+	                              <XIcon aria-hidden="true" className="h-3 w-3" />
                             </button>
                           </span>
                         );
@@ -2185,7 +2506,12 @@ function PromptSkillMainContent() {
                       {selectedPrompt.tags.length === 0 && (
                         <div className="inline-flex items-center gap-1 rounded-full bg-accent px-3 py-1.5 text-xs text-muted-foreground">
                           <HashIcon className="h-3 w-3" />
-                          <span>{t('prompt.selectExistingTags', 'Select existing tags')}</span>
+                          <span>
+                            {t(
+                              'prompt.emptyDetailTagsHint',
+                              'No tags yet. Edit this Prompt or drag tags from the sidebar.',
+                            )}
+                          </span>
                         </div>
                       )}
                     </div>
@@ -2199,13 +2525,7 @@ function PromptSkillMainContent() {
                         {t('prompt.source')}
                       </div>
                       <div className="text-sm rounded-xl p-3 app-wallpaper-surface border border-border break-all">
-                        {selectedPrompt.source.startsWith('http') ? (
-                          <a href={selectedPrompt.source} target="_blank" rel="noreferrer" className="text-primary hover:underline flex items-center gap-1 inline-flex">
-                            <span className="truncate max-w-full">{selectedPrompt.source}</span>
-                          </a>
-                        ) : (
-                          <span className="text-foreground/90">{selectedPrompt.source}</span>
-                        )}
+                        <PromptSourceValue source={selectedPrompt.source} />
                       </div>
                     </div>
                   )}
@@ -2226,97 +2546,66 @@ function PromptSkillMainContent() {
                   {/* 语言切换按钮 - 英文界面时隐藏 */}
                   {(selectedPrompt.systemPromptEn || selectedPrompt.userPromptEn) && !i18n.language.startsWith('en') && (
                     <div className="flex justify-end mb-4">
-                      <button
-                        onClick={() => setShowEnglish(!showEnglish)}
-                        disabled={isDetailInlineEditing}
-                        className={
-                          `flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-xs font-medium transition-all duration-base active:scale-press-in disabled:opacity-50 disabled:cursor-not-allowed ` +
+	                      <button
+	                        type="button"
+	                        onClick={() => setShowEnglish(!showEnglish)}
+	                        disabled={isDetailInlineEditing}
+	                        aria-pressed={showEnglish}
+	                        className={
+	                          `flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-xs font-medium transition-all duration-base active:scale-press-in disabled:opacity-50 disabled:cursor-not-allowed ` +
                           (showEnglish
                             ? 'bg-primary text-white'
                             : 'bg-accent text-muted-foreground hover:text-foreground')
-                        }
-                        title={showEnglish ? t('prompt.showLocalized', '显示当前语言') : t('prompt.showEnglish')}
-                        type="button"
-                      >
-                        <GlobeIcon className="w-3.5 h-3.5" />
-                        {showEnglish ? 'EN' : uiLangTag}
-                      </button>
+	                        }
+	                        title={showEnglish ? t('prompt.showLocalized', '显示当前语言') : t('prompt.showEnglish')}
+	                      >
+	                        <GlobeIcon aria-hidden="true" className="w-3.5 h-3.5" />
+	                        {showEnglish ? 'EN' : uiLangTag}
+	                      </button>
                     </div>
                   )}
 
                   {/* System Prompt */}
                   {((showEnglish ? selectedPrompt.systemPromptEn : selectedPrompt.systemPrompt) || isDetailInlineEditing) && (
-                    <div className="mb-4">
-                      <div className="flex items-center justify-between gap-2 mb-2">
-                        <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider flex items-center gap-1">
-                          {t('prompt.systemPromptLabel', 'System Prompt')}
-                          {showEnglish && <span className="px-1 py-0.5 rounded bg-primary/10 text-primary text-[10px]">EN</span>}
-                        </span>
-                      </div>
-                      {isDetailInlineEditing ? (
-                          <div className="p-4 rounded-xl app-wallpaper-surface border border-border">
-                            <textarea
-                              ref={detailSystemPromptTextareaRef}
-                            aria-label={t('prompt.systemPromptLabel', 'System Prompt')}
-                            value={detailInlineDraft.systemPrompt}
-                            onChange={(event) => {
-                              const nextSystemPrompt = event.target.value;
-                              setDetailInlineDraft((prev) => ({
-                                ...prev,
-                                systemPrompt: nextSystemPrompt,
-                              }));
-                            }}
-                            onKeyDown={(event) => {
-                              const handled = handleMarkdownListKeyDown(
-                                event,
-                                detailInlineDraft.systemPrompt,
-                                (newValue, cursorPos) => {
-                                  setDetailInlineDraft((prev) => ({
-                                    ...prev,
-                                    systemPrompt: newValue,
-                                  }));
-                                  requestAnimationFrame(() => {
-                                    detailSystemPromptTextareaRef.current?.setSelectionRange(cursorPos, cursorPos);
-                                  });
-                                },
-                              );
-                              if (handled) {
-                                return;
-                              }
-                              handleDetailInlineEditKeyDown(event);
-                            }}
-                            className="w-full min-h-[120px] resize-none bg-transparent border-0 p-0 text-[15px] leading-relaxed text-foreground placeholder:text-muted-foreground focus:outline-none"
-                              rows={4}
-                              spellCheck={false}
-                            />
-                        </div>
-                      ) : (
-                        <div
-                          role="button"
-                          tabIndex={0}
-                          aria-label={t('prompt.inlineEditSystemPromptAria', 'Double-click to edit system prompt')}
-                          onDoubleClick={() => openDetailInlineEdit('systemPrompt')}
-                          onKeyDown={(event) => {
-                            if (event.key === 'Enter' || event.key === ' ') {
-                              event.preventDefault();
-                              openDetailInlineEdit('systemPrompt');
-                            }
-                          }}
-                          className="cursor-text rounded-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
-                        >
-                          {renderPromptContent(showEnglish ? (selectedPrompt.systemPromptEn || '') : (selectedPrompt.systemPrompt || ''))}
-                        </div>
+                    <PromptContentField
+                      label={t('prompt.systemPromptLabel', 'System Prompt')}
+                      showEnglishBadge={showEnglish}
+                      isEditing={isDetailInlineEditing}
+                      value={detailInlineDraft.systemPrompt}
+                      onChange={(next) =>
+                        setDetailInlineDraft((prev) => ({ ...prev, systemPrompt: next }))
+                      }
+                      textareaRef={detailSystemPromptTextareaRef}
+                      onEditKeyDown={handleDetailInlineEditKeyDown}
+                      onStartEdit={() => openDetailInlineEdit('systemPrompt')}
+                      renderedContent={renderPromptContent(
+                        showEnglish ? (selectedPrompt.systemPromptEn || '') : (selectedPrompt.systemPrompt || ''),
                       )}
-                    </div>
+                      editAriaLabel={t('prompt.inlineEditSystemPromptAria', 'Double-click to edit system prompt')}
+                      textareaClassName="w-full min-h-[120px] resize-none rounded-xl border border-border/70 bg-card px-4 py-3 text-[15px] leading-relaxed text-foreground shadow-sm outline-none appearance-none placeholder:text-muted-foreground focus:border-primary/40 focus:ring-2 focus:ring-primary/20"
+                      rows={4}
+                    />
                   )}
 
                   {/* User Prompt */}
-                  <div className="mb-4">
-                    <div className="flex items-center justify-between gap-2 mb-2">
-                      <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider flex items-center gap-1">
-                        {t('prompt.userPromptLabel', 'User Prompt')}
-                        {showEnglish && <span className="px-1 py-0.5 rounded bg-primary/10 text-primary text-[10px]">EN</span>}
-                      </span>
+                  <PromptContentField
+                    label={t('prompt.userPromptLabel', 'User Prompt')}
+                    showEnglishBadge={showEnglish}
+                    isEditing={isDetailInlineEditing}
+                    value={detailInlineDraft.userPrompt}
+                    onChange={(next) =>
+                      setDetailInlineDraft((prev) => ({ ...prev, userPrompt: next }))
+                    }
+                    textareaRef={detailUserPromptTextareaRef}
+                    onEditKeyDown={handleDetailInlineEditKeyDown}
+                    onStartEdit={() => openDetailInlineEdit('userPrompt')}
+                    renderedContent={renderPromptContent(
+                      showEnglish ? (selectedPrompt.userPromptEn || selectedPrompt.userPrompt) : selectedPrompt.userPrompt,
+                    )}
+                    editAriaLabel={t('prompt.inlineEditUserPromptAria', 'Double-click to edit user prompt')}
+                    textareaClassName="w-full min-h-[280px] resize-none rounded-xl border border-border/70 bg-card px-4 py-3 text-[15px] leading-relaxed text-foreground shadow-sm outline-none appearance-none placeholder:text-muted-foreground focus:border-primary/40 focus:ring-2 focus:ring-primary/20"
+                    rows={12}
+                    headerAction={
                       <button
                         type="button"
                         onClick={toggleRenderMarkdown}
@@ -2325,62 +2614,8 @@ function PromptSkillMainContent() {
                       >
                         {renderMarkdownEnabled ? t('prompt.viewRaw', 'Show Plain Text') : t('prompt.viewMarkdown', 'Markdown')}
                       </button>
-                    </div>
-                    {isDetailInlineEditing ? (
-                      <div className="p-4 rounded-xl app-wallpaper-surface border border-border">
-                        <textarea
-                          ref={detailUserPromptTextareaRef}
-                          aria-label={t('prompt.userPromptLabel', 'User Prompt')}
-                          value={detailInlineDraft.userPrompt}
-                          onChange={(event) => {
-                            const nextUserPrompt = event.target.value;
-                            setDetailInlineDraft((prev) => ({
-                              ...prev,
-                              userPrompt: nextUserPrompt,
-                            }));
-                          }}
-                          onKeyDown={(event) => {
-                            const handled = handleMarkdownListKeyDown(
-                              event,
-                              detailInlineDraft.userPrompt,
-                              (newValue, cursorPos) => {
-                                setDetailInlineDraft((prev) => ({
-                                  ...prev,
-                                  userPrompt: newValue,
-                                }));
-                                requestAnimationFrame(() => {
-                                  detailUserPromptTextareaRef.current?.setSelectionRange(cursorPos, cursorPos);
-                                });
-                              },
-                            );
-                            if (handled) {
-                              return;
-                            }
-                            handleDetailInlineEditKeyDown(event);
-                          }}
-                          className="w-full min-h-[280px] resize-none bg-transparent border-0 p-0 text-[15px] leading-relaxed text-foreground placeholder:text-muted-foreground focus:outline-none"
-                          rows={12}
-                          spellCheck={false}
-                        />
-                      </div>
-                    ) : (
-                      <div
-                        role="button"
-                        tabIndex={0}
-                        aria-label={t('prompt.inlineEditUserPromptAria', 'Double-click to edit user prompt')}
-                        onDoubleClick={() => openDetailInlineEdit('userPrompt')}
-                        onKeyDown={(event) => {
-                          if (event.key === 'Enter' || event.key === ' ') {
-                            event.preventDefault();
-                            openDetailInlineEdit('userPrompt');
-                          }
-                        }}
-                        className="cursor-text rounded-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
-                      >
-                        {renderPromptContent(showEnglish ? (selectedPrompt.userPromptEn || selectedPrompt.userPrompt) : selectedPrompt.userPrompt)}
-                      </div>
-                    )}
-                  </div>
+                    }
+                  />
 
                   {/* Multi-model comparison */}
                   {/* 多模型对比区域 */}
@@ -2392,186 +2627,94 @@ function PromptSkillMainContent() {
                           <span className="text-sm font-medium">{t('settings.multiModelCompare')}</span>
                           <span className="text-xs text-muted-foreground">{t('prompt.selectModelsHint')}</span>
                         </div>
-                        <button
-                          onClick={() => handleAiTestFromTable(selectedPrompt, 'compare')}
-                          disabled={isDetailInlineEditing}
-                          className="flex items-center gap-2 h-9 px-4 rounded-lg bg-primary text-white text-xs font-medium hover:bg-primary/90 disabled:opacity-50 transition-colors"
-                        >
-                          <GitCompareIcon className="w-3 h-3" />
-                          <span>{t('settings.runCompare')}</span>
-                        </button>
+	                        <button
+	                          type="button"
+	                          onClick={() => handleAiTestFromTable(selectedPrompt, 'compare')}
+	                          disabled={isDetailInlineEditing}
+	                          className="flex items-center gap-2 h-9 px-4 rounded-lg bg-primary text-white text-xs font-medium hover:bg-primary/90 disabled:opacity-50 transition-colors"
+	                        >
+	                          <GitCompareIcon aria-hidden="true" className="w-3 h-3" />
+	                          <span>{t('settings.runCompare')}</span>
+	                        </button>
                       </div>
                     </div>
                   )}
 
                   {/* AI response panel */}
                   {/* AI 测试响应区域 */}
-                  {(isTestingAI || aiResponse) && (
-                    <div className="mb-4 p-4 rounded-xl app-wallpaper-panel border border-border">
-                      <div className="flex items-center justify-between mb-3">
-                        <div className="flex items-center gap-2">
-                          <SparklesIcon className="w-4 h-4 text-primary" />
-                          <span className="text-sm font-medium">{t('prompt.aiResponse', 'AI 响应')}</span>
-                          <span className="text-xs text-muted-foreground">({(selectedPrompt?.promptType === 'image' || isAiResponseImage) ? (defaultImageModel?.model || aiModel) : aiModel})</span>
-                        </div>
-                        {aiResponse && (
-                          <button
-                            onClick={async () => {
-                              await navigator.clipboard.writeText(aiResponse);
-                              showToast(t('toast.copied'), 'success');
-                            }}
-                            className="p-1.5 rounded hover:bg-muted transition-colors"
-                            title={t('prompt.copy')}
-                          >
-                            <CopyIcon className="w-4 h-4 text-muted-foreground" />
-                          </button>
-                        )}
-                      </div>
-                      {isTestingAI && !aiResponse ? (
-                        <div className="flex items-center gap-2 text-muted-foreground">
-                          <LoaderIcon className="w-4 h-4 animate-spin" />
-                          <span className="text-sm">{t('prompt.testing', '测试中...')}</span>
-                        </div>
-                      ) : (
-                        <div className="space-y-3">
-                          {isTestingAI ? (
-                            <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                              <LoaderIcon className="w-3 h-3 animate-spin" />
-                              <span>{t('prompt.testing', '测试中...')}</span>
-                            </div>
-                          ) : null}
-                          {/* Collapsible thinking process / 可折叠的思考过程 */}
-                          <CollapsibleThinking
-                            content={aiThinking}
-                            isLoading={isTestingAI}
-                          />
-                          <div className="text-sm leading-relaxed max-h-80 overflow-y-auto">
-                            {isAiResponseImage && aiResponse ? (
-                              <div className="relative group">
-                                <img 
-                                  src={aiResponse} 
-                                  className="max-w-full rounded-lg shadow-sm bg-black/5 cursor-pointer hover:opacity-90 transition-opacity" 
-                                  alt="Generated AI"
-                                  onClick={() => setPreviewImage(aiResponse)}
-                                />
-                                {/* Image action buttons */}
-                                <div className="absolute bottom-2 right-2 flex gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
-                                  <button
-                                    onClick={() => setPreviewImage(aiResponse)}
-                                    className="p-1.5 rounded-lg bg-black/60 text-white hover:bg-black/80 transition-colors"
-                                    title={t('common.preview', '放大预览')}
-                                  >
-                                    <ZoomInIcon className="w-4 h-4" />
-                                  </button>
-                                    <button
-                                      onClick={async () => {
-                                        try {
-                                          const link = document.createElement('a');
-                                          let href = aiResponse;
-                                          
-                                          // For remote URLs, fetch as blob to force download
-                                          if (!aiResponse.startsWith('data:')) {
-                                              try {
-                                                  const resp = await fetch(aiResponse);
-                                                  const blob = await resp.blob();
-                                                  href = URL.createObjectURL(blob);
-                                              } catch (e) {
-                                                  console.warn('Failed to fetch image blob, falling back to direct link', e);
-                                              }
-                                          }
-                                          
-                                          link.href = href;
-                                          link.download = `ai-generated-${Date.now()}.png`;
-                                          document.body.appendChild(link);
-                                          link.click();
-                                          document.body.removeChild(link);
-                                          
-                                          if (href !== aiResponse) {
-                                              setTimeout(() => URL.revokeObjectURL(href), 100);
-                                          }
-                                          
-                                          showToast(t('common.downloadSuccess'), 'success');
-                                        } catch (err) {
-                                          console.error('Failed to download image:', err);
-                                          showToast(t('common.downloadFailed'), 'error');
-                                        }
-                                      }}
-                                      className="p-1.5 rounded-lg bg-black/60 text-white hover:bg-black/80 transition-colors"
-                                      title={t('common.download', '下载图片')}
-                                    >
-                                      <DownloadIcon className="w-4 h-4" />
-                                    </button>
-                                </div>
-                              </div>
-                            ) : (
-                              renderAiResponseContent(aiResponse)
-                            )}
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  )}
+                  <PromptAiResponsePanel
+                    isTestingAI={isTestingAI}
+                    aiResponse={aiResponse}
+                    aiThinking={aiThinking}
+                    isImage={selectedPrompt?.promptType === 'image' || isAiResponseImage}
+                    modelLabel={
+                      selectedPrompt?.promptType === 'image' || isAiResponseImage
+                        ? defaultImageModel?.model || aiModel
+                        : aiModel
+                    }
+                    t={t}
+                    showToast={showToast}
+                    onPreviewImage={setPreviewImage}
+                    renderMarkdown={renderInlineMarkdownContent}
+                  />
                 </div>
               </div>
               {/* Action buttons - sticky bottom */}
               {/* 操作按钮 - 固定底部 */}
               <div className="flex-shrink-0 border-t border-border app-wallpaper-panel-strong px-6 py-3">
-                <div className="max-w-5xl mx-auto flex items-center gap-3 flex-wrap">
-                  <button
-                    onClick={async () => {
-                      // Select content based on language mode
+                <div className="w-full flex items-center gap-3 flex-wrap">
+	                  <button
+	                    type="button"
+	                    onClick={async () => {
+	                      // Select content based on language mode
                       // 根据语言模式选择内容
                       const currentUserPrompt = showEnglish ? (selectedPrompt.userPromptEn || selectedPrompt.userPrompt) : selectedPrompt.userPrompt;
-                      const currentSystemPrompt = showEnglish ? (selectedPrompt.systemPromptEn || selectedPrompt.systemPrompt) : selectedPrompt.systemPrompt;
-
-                      // Check variables (create a new regex per string to avoid global flag state)
-                      // 检查是否有变量（为每个字符串创建新的正则实例，避免全局标志导致的状态问题）
-                      const hasVariables =
-                        /\{\{([^}]+)\}\}/.test(currentUserPrompt) ||
-                        (currentSystemPrompt && /\{\{([^}]+)\}\}/.test(currentSystemPrompt));
+                      const hasVariables = hasUserDefinedPromptVariables(undefined, currentUserPrompt);
 
                       if (hasVariables) {
                         setIsVariableModalOpen(true);
                       } else {
-                        await navigator.clipboard.writeText(currentUserPrompt);
+                        await copyTextToClipboard(currentUserPrompt);
                         await incrementUsageCount(selectedPrompt.id);
-                        setCopied(true);
+                        triggerCopied();
                         showToast(t('toast.copied'), 'success', showCopyNotification);
-                        setTimeout(() => setCopied(false), 2000);
                       }
                     }}
-                    disabled={isDetailInlineEditing}
-                    className="flex items-center gap-2 h-9 px-4 rounded-lg bg-primary text-white text-sm font-medium hover:bg-primary/90 disabled:opacity-50 transition-colors"
-                  >
-                    {copied ? <CheckIcon className="w-4 h-4" /> : <CopyIcon className="w-4 h-4" />}
-                    <span>{copied ? t('prompt.copied') : t('prompt.copy')}</span>
-                  </button>
-                  <button
-                    onClick={() => {
-                      handleAiTestFromTable(selectedPrompt, 'single');
+	                    disabled={isDetailInlineEditing}
+	                    className="flex items-center gap-2 h-9 px-4 rounded-lg bg-primary text-white text-sm font-medium hover:bg-primary/90 disabled:opacity-50 transition-colors"
+	                  >
+	                    {copied ? <CheckIcon aria-hidden="true" className="w-4 h-4" /> : <CopyIcon aria-hidden="true" className="w-4 h-4" />}
+	                    <span>{copied ? t('prompt.copied') : t('prompt.copy')}</span>
+	                  </button>
+	                  <button
+	                    type="button"
+	                    onClick={() => {
+	                      handleAiTestFromTable(selectedPrompt, 'single');
                     }}
-                    disabled={isDetailInlineEditing}
-                    className="flex items-center gap-2 h-9 px-4 rounded-lg bg-primary/90 text-white text-sm font-medium hover:bg-primary disabled:opacity-50 transition-colors"
-                  >
-                    <PlayIcon className="w-4 h-4" />
-                    <span>{t('prompt.aiTest')}</span>
-                  </button>
-                  <button
-                    onClick={() => handleVersionHistory(selectedPrompt)}
-                    disabled={isDetailInlineEditing}
-                    className="flex items-center gap-2 h-9 px-4 rounded-lg app-wallpaper-surface-strong border border-border text-sm font-medium hover:bg-accent/60 disabled:opacity-50 transition-colors"
-                  >
-                    <HistoryIcon className="w-4 h-4" />
-                    <span>{t('prompt.history')}</span>
-                  </button>
-                  <button
-                    onClick={() => handleDeletePrompt(selectedPrompt)}
-                    disabled={isDetailInlineEditing}
-                    className="flex items-center gap-2 h-9 px-4 rounded-lg bg-destructive/10 border border-destructive/30 text-destructive text-sm font-medium hover:bg-destructive/20 disabled:opacity-50 transition-colors"
-                  >
-                    <TrashIcon className="w-4 h-4" />
-                    <span>{t('prompt.delete')}</span>
-                  </button>
+	                    disabled={isDetailInlineEditing}
+	                    className="flex items-center gap-2 h-9 px-4 rounded-lg bg-primary/90 text-white text-sm font-medium hover:bg-primary disabled:opacity-50 transition-colors"
+	                  >
+	                    <PlayIcon aria-hidden="true" className="w-4 h-4" />
+	                    <span>{t('prompt.aiTest')}</span>
+	                  </button>
+	                  <button
+	                    type="button"
+	                    onClick={() => handleVersionHistory(selectedPrompt)}
+	                    disabled={isDetailInlineEditing}
+	                    className="flex items-center gap-2 h-9 px-4 rounded-lg app-wallpaper-surface-strong border border-border text-sm font-medium hover:bg-accent/60 disabled:opacity-50 transition-colors"
+	                  >
+	                    <HistoryIcon aria-hidden="true" className="w-4 h-4" />
+	                    <span>{t('prompt.history')}</span>
+	                  </button>
+	                  <button
+	                    type="button"
+	                    onClick={() => handleDeletePrompt(selectedPrompt)}
+	                    disabled={isDetailInlineEditing}
+	                    className="flex items-center gap-2 h-9 px-4 rounded-lg bg-destructive/10 border border-destructive/30 text-destructive text-sm font-medium hover:bg-destructive/20 disabled:opacity-50 transition-colors"
+	                  >
+	                    <TrashIcon aria-hidden="true" className="w-4 h-4" />
+	                    <span>{t('prompt.delete')}</span>
+	                  </button>
                 </div>
               </div>
             </div>
@@ -2585,9 +2728,6 @@ function PromptSkillMainContent() {
           )}
         </div>
       </div>
-
-      {/* Shared modals */}
-      {/* 共享弹窗 */}
 
       {/* Edit modal */}
       {/* 编辑弹窗 */}
@@ -2659,6 +2799,11 @@ function PromptSkillMainContent() {
             onCopy={handleCopyPrompt}
             onEdit={(prompt) => setEditingPrompt(prompt)}
             onQuickRewriteEdit={(prompt) => setEditingPrompt(prompt)}
+            prompts={prompts}
+            relations={relations}
+            onCreateRelation={handleCreatePromptRelation}
+            onDeleteRelation={handleDeletePromptRelation}
+            onSelectPrompt={(promptId) => selectPrompt(promptId)}
           />
         </Suspense>
       )}
@@ -2671,15 +2816,14 @@ function PromptSkillMainContent() {
             isOpen={isVariableModalOpen}
             onClose={() => setIsVariableModalOpen(false)}
             promptId={selectedPrompt.id}
-            systemPrompt={showEnglish ? (selectedPrompt.systemPromptEn || selectedPrompt.systemPrompt) : selectedPrompt.systemPrompt}
+            systemPrompt={undefined}
             userPrompt={showEnglish ? (selectedPrompt.userPromptEn || selectedPrompt.userPrompt) : selectedPrompt.userPrompt}
             mode="copy"
             onCopy={async (text) => {
-              await navigator.clipboard.writeText(text);
+              await copyTextToClipboard(text);
               await incrementUsageCount(selectedPrompt.id);
-              setCopied(true);
+              triggerCopied();
               showToast(t('toast.copied'), 'success', showCopyNotification);
-              setTimeout(() => setCopied(false), 2000);
               setIsVariableModalOpen(false);
             }}
           />
@@ -2735,15 +2879,14 @@ function PromptSkillMainContent() {
               setCopyPrompt(null);
             }}
             promptId={copyPrompt.id}
-            systemPrompt={resolvePromptContentByLanguage(copyPrompt, showEnglish).systemPrompt}
+            systemPrompt={undefined}
             userPrompt={resolvePromptContentByLanguage(copyPrompt, showEnglish).userPrompt}
             mode="copy"
             onCopy={async (text) => {
-              await navigator.clipboard.writeText(text);
+              await copyTextToClipboard(text);
               await incrementUsageCount(copyPrompt.id);
-              setCopied(true);
+              triggerCopied();
               showToast(t('toast.copied'), 'success', showCopyNotification);
-              setTimeout(() => setCopied(false), 2000);
               setIsCopyVariableModalOpen(false);
               setCopyPrompt(null);
             }}

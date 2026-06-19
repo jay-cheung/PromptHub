@@ -77,12 +77,13 @@ export function findInstalledRegistrySkill(
   const contentUrl = registrySkill.content_url?.toLowerCase();
   const sourceUrl = registrySkill.source_url?.toLowerCase();
   const installName = (registrySkill.install_name || registrySkill.slug).toLowerCase();
+  const hasInstalledSourceIdentity = (skill: Skill) =>
+    Boolean(skill.source_id || skill.content_url || skill.source_url);
 
   return (
     (sourceId
       ? skills.find((skill) => skill.source_id?.toLowerCase() === sourceId)
       : undefined) ||
-    skills.find((skill) => skill.registry_slug?.toLowerCase() === slug) ||
     (contentUrl
       ? skills.find((skill) => skill.content_url?.toLowerCase() === contentUrl)
       : undefined) ||
@@ -93,6 +94,11 @@ export function findInstalledRegistrySkill(
             skill.name.toLowerCase() === installName,
         )
       : undefined) ||
+    skills.find(
+      (skill) =>
+        skill.registry_slug?.toLowerCase() === slug &&
+        !hasInstalledSourceIdentity(skill),
+    ) ||
     null
   );
 }
@@ -117,10 +123,15 @@ export async function getRegistrySkillUpdateStatus(
   const localContent = installedSkill.content ?? installedSkill.instructions ?? "";
   const localHash = await computeSkillContentHash(localContent);
   const installedHash = installedSkill.installed_content_hash;
-  const localModified = Boolean(installedHash && localHash !== installedHash);
-  const remoteChanged = installedHash
-    ? remoteHash !== installedHash
-    : remoteHash !== localHash || registrySkill.version !== installedSkill.version;
+  const localMatchesRemote = localHash === remoteHash;
+  const localModified = localMatchesRemote
+    ? false
+    : Boolean(installedHash && localHash !== installedHash);
+  const remoteChanged = localMatchesRemote
+    ? false
+    : installedHash
+      ? remoteHash !== installedHash
+      : remoteHash !== localHash || registrySkill.version !== installedSkill.version;
 
   let status: RegistrySkillUpdateStatus = "up-to-date";
   if (localModified && remoteChanged) {

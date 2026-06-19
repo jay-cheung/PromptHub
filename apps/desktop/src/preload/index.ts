@@ -4,6 +4,8 @@ import { aiApi } from "./api/ai";
 import { cliApi } from "./api/cli";
 import { folderApi } from "./api/folder";
 import { ioApi } from "./api/io";
+import { mcpApi } from "./api/mcp";
+import { pluginApi } from "./api/plugin";
 import { promptApi } from "./api/prompt";
 import { rulesApi } from "./api/rules";
 import { settingsApi } from "./api/settings";
@@ -109,6 +111,8 @@ const api = {
   io: ioApi,
   ai: aiApi,
   cli: cliApi,
+  mcp: mcpApi,
+  plugin: pluginApi,
 
   // Listen to main process events (with whitelist)
   // 监听主进程事件（使用白名单）
@@ -201,6 +205,9 @@ contextBridge.exposeInMainWorld("electron", {
     ipcRenderer.send("window:closeDialogCancel");
   },
   selectFolder: () => ipcRenderer.invoke("dialog:selectFolder"),
+  selectMcpSourceFolder: () =>
+    ipcRenderer.invoke("dialog:selectMcpSourceFolder"),
+  selectMcpConfigFile: () => ipcRenderer.invoke("dialog:selectMcpConfigFile"),
   getPathForFile: (file: File) => webUtils.getPathForFile(file),
   openPath: (path: string) => ipcRenderer.invoke("shell:openPath", path),
   showNotification: (title: string, body: string) =>
@@ -469,6 +476,8 @@ declare global {
       ) => void;
       sendCloseDialogCancel?: () => void;
       selectFolder?: () => Promise<string | null>;
+      selectMcpSourceFolder?: () => Promise<string | null>;
+      selectMcpConfigFile?: () => Promise<string | null>;
       getPathForFile?: (file: File) => string;
       openPath?: (
         path: string,
@@ -679,7 +688,7 @@ declare global {
       readVideoBase64?: (fileName: string) => Promise<string | null>;
       saveVideoBase64?: (fileName: string, base64: string) => Promise<boolean>;
       videoExists?: (fileName: string) => Promise<boolean>;
-      getVideoPath?: (fileName: string) => Promise<string>;
+      getVideoPath?: (fileName: string) => Promise<string | null>;
       clearVideos?: () => Promise<boolean>;
     };
   }

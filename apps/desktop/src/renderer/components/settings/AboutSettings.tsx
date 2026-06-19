@@ -16,6 +16,7 @@ import { Modal } from "../ui/Modal";
 import { useToast } from "../ui/Toast";
 import appIconUrl from "../../../assets/icon.png";
 import { isWebRuntime } from "../../runtime";
+import { copyTextToClipboard } from "../../utils/clipboard";
 
 type UpdateCheckState = "idle" | "checking" | "latest" | "available";
 
@@ -81,6 +82,8 @@ export function AboutSettings() {
       if (!res.ok) throw new Error("fetch failed");
       const data = (await res.json()) as { tag_name?: string };
       const latest = (data.tag_name || "").replace(/^v/, "");
+      if (!latest) throw new Error("missing latest release tag");
+      if (!webVersion) throw new Error("missing current web version");
       setLatestVersion(latest);
       const isNewer =
         latest &&
@@ -90,6 +93,7 @@ export function AboutSettings() {
       setUpdateState(isNewer ? "available" : "latest");
     } catch {
       setUpdateState("idle");
+      showToast(t("settings.updateCheckFailed"), "error");
     }
   };
 
@@ -114,7 +118,7 @@ export function AboutSettings() {
 
   const handleCopyQQGroup = async () => {
     try {
-      await navigator.clipboard.writeText(qqGroupNumber);
+      await copyTextToClipboard(qqGroupNumber);
       showToast(t("settings.communityQQCopied", { group: qqGroupNumber }), "success");
     } catch (error) {
       console.error("Failed to copy QQ group number:", error);
@@ -173,21 +177,23 @@ export function AboutSettings() {
                   rel="noopener noreferrer"
                   className="h-8 px-4 rounded-lg bg-primary text-white text-sm hover:bg-primary/90 transition-colors inline-flex items-center gap-1.5"
                 >
-                  <ArrowUpCircleIcon className="w-4 h-4" />
+                  <ArrowUpCircleIcon aria-hidden="true" className="w-4 h-4" />
                   {t("settings.newVersion", { version: latestVersion })}
                 </a>
               ) : updateState === "latest" ? (
                 <span className="flex items-center gap-1.5 text-sm text-green-600 dark:text-green-400">
-                  <CheckCircleIcon className="w-4 h-4" />
+                  <CheckCircleIcon aria-hidden="true" className="w-4 h-4" />
                   {t("settings.noUpdateDesc", { version: webVersion })}
                 </span>
               ) : (
                 <button
+                  type="button"
                   onClick={checkWebUpdate}
                   disabled={updateState === "checking"}
                   className="h-8 px-4 rounded-lg bg-primary text-white text-sm hover:bg-primary/90 transition-colors disabled:opacity-60 inline-flex items-center gap-1.5"
                 >
                   <RefreshCwIcon
+                    aria-hidden="true"
                     className={`w-4 h-4 ${updateState === "checking" ? "animate-spin" : ""}`}
                   />
                   {updateState === "checking"
@@ -204,6 +210,7 @@ export function AboutSettings() {
               description={t("settings.autoCheckUpdateDesc")}
             >
               <ToggleSwitch
+                ariaLabel={t("settings.autoCheckUpdate")}
                 checked={settings.autoCheckUpdate}
                 onChange={settings.setAutoCheckUpdate}
               />
@@ -213,6 +220,7 @@ export function AboutSettings() {
               description={t("settings.mirrorSourceRisk")}
             >
               <ToggleSwitch
+                ariaLabel={t("settings.tryMirrorSource")}
                 checked={settings.useUpdateMirror}
                 onChange={settings.setUseUpdateMirror}
               />
@@ -222,6 +230,7 @@ export function AboutSettings() {
               description={t("settings.joinPreviewChannelDesc")}
             >
               <ToggleSwitch
+                ariaLabel={t("settings.joinPreviewChannel")}
                 checked={settings.updateChannel === "preview"}
                 onChange={handlePreviewChannelChange}
               />
@@ -239,6 +248,7 @@ export function AboutSettings() {
               }
             >
               <button
+                type="button"
                 onClick={() =>
                   window.dispatchEvent(new CustomEvent("open-update-dialog"))
                 }
@@ -250,123 +260,138 @@ export function AboutSettings() {
           </SettingSection>
         )}
 
-        <SettingSection title={t("settings.openSource")}>
-          <SettingItem
-            label={t("settings.projectRepository")}
-            description={t("settings.projectRepositoryDesc")}
-          >
-            <a
-              href="https://github.com/legeling/PromptHub"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex items-center gap-2 text-sm font-medium text-primary hover:underline"
+        <div
+          data-testid="about-support-grid"
+          className="grid grid-cols-1 gap-6"
+        >
+          <SettingSection title={t("settings.openSource")}>
+            <SettingItem
+              label={t("settings.projectRepository")}
+              description={t("settings.projectRepositoryDesc")}
             >
-              <GithubIcon className="h-4 w-4" />
-              github.com/legeling/PromptHub
-            </a>
-          </SettingItem>
-          <SettingItem
-            label={t("settings.reportIssue")}
-            description={t("settings.reportIssueDesc")}
-          >
-            <a
-              href="https://github.com/legeling/PromptHub/issues/new"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="h-8 px-4 rounded-lg bg-orange-500 text-white text-sm hover:bg-orange-600 transition-colors inline-flex items-center gap-1.5"
-            >
-              <MessageSquareIcon className="w-4 h-4" />
-              Issue
-            </a>
-          </SettingItem>
-        </SettingSection>
-
-        <SettingSection title={t("settings.communityTitle")}> 
-          <SettingItem
-            label={t("settings.communityDiscord")}
-            description={t("settings.communityDiscordDesc")}
-          >
-            <a
-              href="https://discord.gg/zmfWguWFB"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex h-9 items-center gap-2 rounded-xl bg-[#5865F2] px-4 text-sm font-medium text-white shadow-sm transition-colors hover:bg-[#4752C4]"
-            >
-              <DiscordBrandIcon className="h-4 w-4" />
-              Discord
-            </a>
-          </SettingItem>
-          <SettingItem
-            label={t("settings.communityQQ")}
-            description={t("settings.communityQQDesc", { group: qqGroupNumber })}
-          >
-            <div className="flex items-center gap-2">
               <a
-                href={qqGroupLink}
+                href="https://github.com/legeling/PromptHub"
                 target="_blank"
                 rel="noopener noreferrer"
-                className="inline-flex h-9 items-center gap-2 rounded-xl bg-[#12B7F5] px-4 text-sm font-medium text-white shadow-sm transition-colors hover:bg-[#0ea5e9]"
+                className="inline-flex items-center gap-2 text-sm font-medium text-primary hover:underline"
               >
-                <QQBrandIcon className="h-4 w-4" />
-                QQ
+                <GithubIcon aria-hidden="true" className="h-4 w-4" />
+                github.com/legeling/PromptHub
               </a>
-              <button
-                type="button"
-                onClick={() => void handleCopyQQGroup()}
-                className="inline-flex h-9 items-center gap-2 rounded-xl border border-border bg-background px-3.5 text-sm font-medium text-foreground transition-colors hover:bg-muted/60"
-              >
-                <CopyIcon className="w-4 h-4" />
-                {t("settings.communityQQCopy")}
-              </button>
-            </div>
-          </SettingItem>
-        </SettingSection>
-
-        <SettingSection title={t("settings.contactAuthor")}>
-          <div className="px-4 py-3 space-y-3">
-            <a
-              href="https://github.com/legeling"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="flex items-center gap-3 p-2 rounded-lg hover:bg-muted/50 transition-colors group"
-            >
-              <div className="w-8 h-8 rounded-full bg-foreground/10 flex items-center justify-center">
-                <GithubIcon className="w-4 h-4 text-foreground" />
-              </div>
-              <div className="flex-1">
-                <div className="text-sm font-medium">@legeling</div>
-                <div className="text-xs text-muted-foreground">GitHub</div>
-              </div>
-              <ExternalLinkIcon className="w-4 h-4 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" />
-            </a>
-            <a
-              href="mailto:legeling567@gmail.com"
-              className="flex items-center gap-3 p-2 rounded-lg hover:bg-muted/50 transition-colors group"
-            >
-              <div className="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center">
-                <MailIcon className="w-4 h-4 text-primary" />
-              </div>
-              <div className="flex-1">
-                <div className="text-sm font-medium">legeling567@gmail.com</div>
-                <div className="text-xs text-muted-foreground">Email</div>
-              </div>
-            </a>
-          </div>
-        </SettingSection>
-
-        {!webRuntime ? (
-          <SettingSection title={t("settings.developer")}>
+            </SettingItem>
             <SettingItem
-              label={t("settings.debugMode")}
-              description={t("settings.debugModeDesc")}
+              label={t("settings.reportIssue")}
+              description={t("settings.reportIssueDesc")}
             >
-              <ToggleSwitch
-                checked={settings.debugMode}
-                onChange={settings.setDebugMode}
-              />
+              <a
+                href="https://github.com/legeling/PromptHub/issues/new"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="h-8 px-4 rounded-lg bg-orange-500 text-white text-sm hover:bg-orange-600 transition-colors inline-flex items-center gap-1.5"
+              >
+                <MessageSquareIcon aria-hidden="true" className="w-4 h-4" />
+                Issue
+              </a>
             </SettingItem>
           </SettingSection>
-        ) : null}
+
+          <SettingSection title={t("settings.communityTitle")}>
+            <SettingItem
+              label={t("settings.communityDiscord")}
+              description={t("settings.communityDiscordDesc")}
+            >
+              <a
+                href="https://discord.gg/zmfWguWFB"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex h-9 items-center gap-2 rounded-xl bg-[#5865F2] px-4 text-sm font-medium text-white shadow-sm transition-colors hover:bg-[#4752C4]"
+              >
+                <DiscordBrandIcon className="h-4 w-4" />
+                Discord
+              </a>
+            </SettingItem>
+            <SettingItem
+              label={t("settings.communityQQ")}
+              description={t("settings.communityQQDesc", { group: qqGroupNumber })}
+            >
+              <div className="flex items-center gap-2">
+                <a
+                  href={qqGroupLink}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex h-9 items-center gap-2 rounded-xl bg-[#12B7F5] px-4 text-sm font-medium text-white shadow-sm transition-colors hover:bg-[#0ea5e9]"
+                >
+                  <QQBrandIcon className="h-4 w-4" />
+                  QQ
+                </a>
+                <button
+                  type="button"
+                  onClick={() => void handleCopyQQGroup()}
+                  className="inline-flex h-9 items-center gap-2 rounded-xl border border-border bg-background px-3.5 text-sm font-medium text-foreground transition-colors hover:bg-muted/60"
+                >
+                  <CopyIcon aria-hidden="true" className="w-4 h-4" />
+                  {t("settings.communityQQCopy")}
+                </button>
+              </div>
+            </SettingItem>
+          </SettingSection>
+
+          <SettingSection title={t("settings.contactAuthor")}>
+            <div className="px-4 py-3 space-y-3">
+              <a
+                href="https://github.com/legeling"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center gap-3 p-2 rounded-lg hover:bg-muted/50 transition-colors group"
+              >
+                <div className="w-8 h-8 rounded-full bg-foreground/10 flex items-center justify-center">
+                  <GithubIcon
+                    aria-hidden="true"
+                    className="w-4 h-4 text-foreground"
+                  />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="text-sm font-medium">@legeling</div>
+                  <div className="text-xs text-muted-foreground">GitHub</div>
+                </div>
+                <ExternalLinkIcon
+                  aria-hidden="true"
+                  className="w-4 h-4 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity"
+                />
+              </a>
+              <a
+                href="mailto:legeling567@gmail.com"
+                className="flex items-center gap-3 p-2 rounded-lg hover:bg-muted/50 transition-colors group"
+              >
+                <div className="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center">
+                  <MailIcon
+                    aria-hidden="true"
+                    className="w-4 h-4 text-primary"
+                  />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="text-sm font-medium">legeling567@gmail.com</div>
+                  <div className="text-xs text-muted-foreground">Email</div>
+                </div>
+              </a>
+            </div>
+          </SettingSection>
+
+          {!webRuntime ? (
+            <SettingSection title={t("settings.developer")}>
+              <SettingItem
+                label={t("settings.debugMode")}
+                description={t("settings.debugModeDesc")}
+              >
+                <ToggleSwitch
+                  ariaLabel={t("settings.debugMode")}
+                  checked={settings.debugMode}
+                  onChange={settings.setDebugMode}
+                />
+              </SettingItem>
+            </SettingSection>
+          ) : null}
+        </div>
 
         <div className="px-4 py-4 text-sm text-muted-foreground text-center">
           <div>AGPL-3.0 License &copy; 2026 PromptHub</div>

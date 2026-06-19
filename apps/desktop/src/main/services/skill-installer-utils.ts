@@ -3,6 +3,10 @@ import * as os from "os";
 import * as path from "path";
 import { initDatabase } from "../database";
 import { parseGitRepo } from "@prompthub/shared/utils/git-repo";
+import {
+  isPrivateAddress,
+  resolvePublicAddress,
+} from "./skill-installer-remote";
 import type { MCPServerConfig } from "@prompthub/shared/types/skill";
 import {
   getPlatformById,
@@ -109,6 +113,37 @@ function normalizeRemoteGitUrl(url: string): string {
   return parsedRepo?.cloneUrl ?? trimmed;
 }
 
+function isSshStyleGitUrl(url: string): boolean {
+  return /^git@[^:]+:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\.git)?\/?$/.test(url);
+}
+
+async function validateRemoteGitTransportUrl(
+  normalizedUrl: string,
+  operation: "clone" | "remote",
+): Promise<void> {
+  if (isSshStyleGitUrl(normalizedUrl)) {
+    return;
+  }
+
+  const parsedUrl = new URL(normalizedUrl);
+  if (parsedUrl.protocol === "https:") {
+    return;
+  }
+  if (parsedUrl.protocol === "http:") {
+    const resolvedAddress = await resolvePublicAddress(parsedUrl.hostname, {
+      allowPrivateNetwork: true,
+    });
+    if (isPrivateAddress(resolvedAddress.address)) {
+      return;
+    }
+  }
+
+  const noun = operation === "clone" ? "clone" : "remote";
+  throw new Error(
+    `Only HTTPS, private-network HTTP, or git@<host> SSH ${noun} URLs are allowed`,
+  );
+}
+
 export function gitClone(
   url: string,
   destDir: string,
@@ -123,64 +158,56 @@ export function gitClone(
 
   const normalizedUrl = normalizeRemoteGitUrl(url);
 
-  const isSshGitUrl = /^git@[^:]+:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\.git)?\/?$/.test(
-    normalizedUrl,
+  return validateRemoteGitTransportUrl(normalizedUrl, "clone").then(
+    () =>
+      new Promise((resolve, reject) => {
+        const cloneArgs = ["clone", "--depth", "1"];
+        if (branch?.trim()) {
+          cloneArgs.push("--branch", branch.trim());
+        }
+        cloneArgs.push("--", normalizedUrl, destDir);
+        const proc = childProcess.spawn("git", cloneArgs, {
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+
+        let stderr = "";
+        let settled = false;
+
+        const timeout = setTimeout(() => {
+          if (!settled) {
+            settled = true;
+            proc.kill("SIGKILL");
+            reject(
+              new Error(
+                `Git clone timed out after ${GIT_CLONE_TIMEOUT_MS / 1000}s for URL: ${url}`,
+              ),
+            );
+          }
+        }, GIT_CLONE_TIMEOUT_MS);
+
+        proc.stderr?.on("data", (data) => {
+          stderr += data.toString();
+        });
+
+        proc.on("close", (code) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timeout);
+          if (code === 0) {
+            resolve();
+          } else {
+            reject(new Error(`Git clone failed with code ${code}: ${stderr}`));
+          }
+        });
+
+        proc.on("error", (error) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timeout);
+          reject(new Error(`Git clone error: ${error.message}`));
+        });
+      }),
   );
-
-  if (!isSshGitUrl) {
-    const parsedUrl = new URL(normalizedUrl);
-    if (parsedUrl.protocol !== "https:") {
-      throw new Error("Only HTTPS or git@<host> SSH clone URLs are allowed");
-    }
-  }
-
-  return new Promise((resolve, reject) => {
-    const cloneArgs = ["clone", "--depth", "1"];
-    if (branch?.trim()) {
-      cloneArgs.push("--branch", branch.trim());
-    }
-    cloneArgs.push("--", normalizedUrl, destDir);
-    const proc = childProcess.spawn("git", cloneArgs, {
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-
-    let stderr = "";
-    let settled = false;
-
-    const timeout = setTimeout(() => {
-      if (!settled) {
-        settled = true;
-        proc.kill("SIGKILL");
-        reject(
-          new Error(
-            `Git clone timed out after ${GIT_CLONE_TIMEOUT_MS / 1000}s for URL: ${url}`,
-          ),
-        );
-      }
-    }, GIT_CLONE_TIMEOUT_MS);
-
-    proc.stderr?.on("data", (data) => {
-      stderr += data.toString();
-    });
-
-    proc.on("close", (code) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      if (code === 0) {
-        resolve();
-      } else {
-        reject(new Error(`Git clone failed with code ${code}: ${stderr}`));
-      }
-    });
-
-    proc.on("error", (error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      reject(new Error(`Git clone error: ${error.message}`));
-    });
-  });
 }
 
 export function gitListRemoteBranches(url: string): Promise<string[]> {
@@ -193,23 +220,87 @@ export function gitListRemoteBranches(url: string): Promise<string[]> {
 
   const normalizedUrl = normalizeRemoteGitUrl(url);
 
-  const isSshGitUrl = /^git@[^:]+:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\.git)?\/?$/.test(
-    normalizedUrl,
-  );
+  return validateRemoteGitTransportUrl(normalizedUrl, "remote").then(
+    () =>
+      new Promise((resolve, reject) => {
+        const proc = childProcess.spawn(
+          "git",
+          ["ls-remote", "--heads", "--", normalizedUrl],
+          { stdio: ["ignore", "pipe", "pipe"] },
+        );
 
-  if (!isSshGitUrl) {
-    const parsedUrl = new URL(normalizedUrl);
-    if (parsedUrl.protocol !== "https:") {
-      throw new Error("Only HTTPS or git@<host> SSH remote URLs are allowed");
-    }
+        let stdout = "";
+        let stderr = "";
+        let settled = false;
+
+        const timeout = setTimeout(() => {
+          if (!settled) {
+            settled = true;
+            proc.kill("SIGKILL");
+            reject(
+              new Error(
+                `Git remote branch listing timed out after ${GIT_REMOTE_TIMEOUT_MS / 1000}s for URL: ${url}`,
+              ),
+            );
+          }
+        }, GIT_REMOTE_TIMEOUT_MS);
+
+        proc.stdout?.on("data", (data) => {
+          stdout += data.toString();
+        });
+
+        proc.stderr?.on("data", (data) => {
+          stderr += data.toString();
+        });
+
+        proc.on("close", (code) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timeout);
+          if (code !== 0) {
+            reject(
+              new Error(
+                `Git remote branch listing failed with code ${code}: ${stderr}`,
+              ),
+            );
+            return;
+          }
+
+          const branches = stdout
+            .split(/\r?\n/u)
+            .map((line) => line.trim())
+            .filter(Boolean)
+            .map((line) => line.split(/\s+/u)[1] ?? "")
+            .filter((ref) => ref.startsWith("refs/heads/"))
+            .map((ref) => ref.replace(/^refs\/heads\//u, ""))
+            .filter(Boolean)
+            .sort((a, b) => a.localeCompare(b));
+
+          resolve(branches);
+        });
+
+        proc.on("error", (error) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timeout);
+          reject(
+            new Error(`Git remote branch listing error: ${error.message}`),
+          );
+        });
+      }),
+  );
+}
+
+export function gitGetCurrentBranch(repoDir: string): Promise<string | null> {
+  if (!repoDir.trim()) {
+    throw new Error("Git repository directory cannot be empty");
   }
 
   return new Promise((resolve, reject) => {
-    const proc = childProcess.spawn(
-      "git",
-      ["ls-remote", "--heads", "--", normalizedUrl],
-      { stdio: ["ignore", "pipe", "pipe"] },
-    );
+    const proc = childProcess.spawn("git", ["branch", "--show-current"], {
+      cwd: repoDir,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
 
     let stdout = "";
     let stderr = "";
@@ -221,7 +312,7 @@ export function gitListRemoteBranches(url: string): Promise<string[]> {
         proc.kill("SIGKILL");
         reject(
           new Error(
-            `Git remote branch listing timed out after ${GIT_REMOTE_TIMEOUT_MS / 1000}s for URL: ${url}`,
+            `Git current branch lookup timed out after ${GIT_REMOTE_TIMEOUT_MS / 1000}s in: ${repoDir}`,
           ),
         );
       }
@@ -240,45 +331,44 @@ export function gitListRemoteBranches(url: string): Promise<string[]> {
       settled = true;
       clearTimeout(timeout);
       if (code !== 0) {
-        reject(new Error(`Git remote branch listing failed with code ${code}: ${stderr}`));
+        reject(
+          new Error(
+            `Git current branch lookup failed with code ${code}: ${stderr}`,
+          ),
+        );
         return;
       }
 
-      const branches = stdout
-        .split(/\r?\n/u)
-        .map((line) => line.trim())
-        .filter(Boolean)
-        .map((line) => line.split(/\s+/u)[1] ?? "")
-        .filter((ref) => ref.startsWith("refs/heads/"))
-        .map((ref) => ref.replace(/^refs\/heads\//u, ""))
-        .filter(Boolean)
-        .sort((a, b) => a.localeCompare(b));
-
-      resolve(branches);
+      const branch = stdout.trim();
+      resolve(branch || null);
     });
 
     proc.on("error", (error) => {
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
-      reject(new Error(`Git remote branch listing error: ${error.message}`));
+      reject(new Error(`Git current branch lookup error: ${error.message}`));
     });
   });
 }
 
 export function resolvePlatformPath(template: string): string {
   const home = os.homedir();
+  const appData = process.env.APPDATA || path.join(home, "AppData", "Roaming");
   return template
     .replace(/^~/, home)
     .replace(/%USERPROFILE%/gi, home)
-    .replace(/%APPDATA%/gi, path.join(home, "AppData", "Roaming"));
+    .replace(/%APPDATA%/gi, appData);
 }
 
 let _customRootPathsCache: Record<string, string> | null = null;
 let _customRootPathsCacheTs = 0;
 const CUSTOM_PATHS_CACHE_TTL = 5000; // 5 seconds
 
-let _builtinAgentOverridesCache: Record<string, BuiltinAgentOverrideConfig> | null = null;
+let _builtinAgentOverridesCache: Record<
+  string,
+  BuiltinAgentOverrideConfig
+> | null = null;
 let _builtinAgentOverridesCacheTs = 0;
 
 function normalizeBuiltinAgentOverrides(
@@ -304,6 +394,16 @@ function normalizeBuiltinAgentOverrides(
         typeof record.skillsRelativePath === "string" &&
         record.skillsRelativePath.trim().length > 0
           ? record.skillsRelativePath.trim().replace(/^[\\/]+|[\\/]+$/g, "")
+          : undefined,
+      mcpRelativePath:
+        typeof record.mcpRelativePath === "string" &&
+        record.mcpRelativePath.trim().length > 0
+          ? record.mcpRelativePath.trim().replace(/^[\\/]+|[\\/]+$/g, "")
+          : undefined,
+      pluginsRelativePath:
+        typeof record.pluginsRelativePath === "string" &&
+        record.pluginsRelativePath.trim().length > 0
+          ? record.pluginsRelativePath.trim().replace(/^[\\/]+|[\\/]+$/g, "")
           : undefined,
       rulesRelativePath:
         typeof record.rulesRelativePath === "string" &&
@@ -333,6 +433,35 @@ function normalizeBuiltinAgentOverrides(
 
 function joinRootRelativePath(rootDir: string, relativePath: string): string {
   return path.join(rootDir, ...relativePath.split(/[\\/]+/).filter(Boolean));
+}
+
+export function getDefaultMcpRelativePath(platformId?: string): string {
+  const paths: Record<string, string> = {
+    claude: "../.claude.json",
+    codex: "config.toml",
+    gemini: "settings.json",
+    opencode: "opencode.json",
+    cursor: "mcp.json",
+    cline: "cline_mcp_settings.json",
+    windsurf: "mcp_config.json",
+    kiro: "settings/mcp.json",
+    copilot: "mcp.json",
+  };
+  return platformId ? paths[platformId] || "mcp.json" : "mcp.json";
+}
+
+export function getDefaultPluginsRelativePath(
+  platformId?: string,
+): string | undefined {
+  const paths: Record<string, string> = {
+    claude: "plugins/cache/prompthub",
+    codex: "plugins/cache/prompthub",
+    cursor: "plugins/cache/prompthub",
+    gemini: "config/plugins",
+    kiro: "powers",
+    copilot: "plugins",
+  };
+  return platformId ? paths[platformId] : undefined;
 }
 
 function deriveLegacyRootPathMap(
@@ -397,9 +526,9 @@ function readBuiltinAgentOverridesFromSettings(): Record<
 
     const parsedRootPaths = normalizeBuiltinAgentOverrides(
       Object.fromEntries(
-        Object.entries(parseJsonSetting<Record<string, string>>(rootRow?.value, {})).map(
-          ([platformId, rootPath]) => [platformId, { rootPath }],
-        ),
+        Object.entries(
+          parseJsonSetting<Record<string, string>>(rootRow?.value, {}),
+        ).map(([platformId, rootPath]) => [platformId, { rootPath }]),
       ),
     );
     if (Object.keys(parsedRootPaths).length > 0) {
@@ -408,7 +537,10 @@ function readBuiltinAgentOverridesFromSettings(): Record<
       return _builtinAgentOverridesCache;
     }
 
-    const parsedLegacyPaths = parseJsonSetting<Record<string, string>>(legacyRow?.value, {});
+    const parsedLegacyPaths = parseJsonSetting<Record<string, string>>(
+      legacyRow?.value,
+      {},
+    );
     _builtinAgentOverridesCache = normalizeBuiltinAgentOverrides(
       Object.fromEntries(
         Object.entries(parsedLegacyPaths).map(([platformId, value]) => {
@@ -416,7 +548,10 @@ function readBuiltinAgentOverridesFromSettings(): Record<
           if (!platform) {
             return [platformId, { rootPath: value }];
           }
-          return [platformId, { rootPath: migrateLegacySkillPathToRootPath(platform, value) }];
+          return [
+            platformId,
+            { rootPath: migrateLegacySkillPathToRootPath(platform, value) },
+          ];
         }),
       ),
     );
@@ -541,7 +676,8 @@ export function getPlatformSkillsDir(
 ): string {
   const rootDir = getPlatformRootDir(platform, overrides);
   const relativePath =
-    getBuiltinAgentOverride(platform.id)?.skillsRelativePath || platform.skillsRelativePath;
+    getBuiltinAgentOverride(platform.id)?.skillsRelativePath ||
+    platform.skillsRelativePath;
 
   return joinRootRelativePath(rootDir, relativePath);
 }
@@ -551,13 +687,30 @@ export function getPlatformGlobalRulePath(
   overrides?: Record<string, string>,
 ): string | null {
   const relativePath =
-    getBuiltinAgentOverride(platform.id)?.rulesRelativePath || platform.globalRuleFile;
+    getBuiltinAgentOverride(platform.id)?.rulesRelativePath ||
+    platform.globalRuleFile;
 
   if (!relativePath) {
     return null;
   }
 
   const rootDir = getPlatformRootDir(platform, overrides);
+  return joinRootRelativePath(rootDir, relativePath);
+}
+
+export function getPlatformPluginDir(
+  platform: SkillPlatform,
+  overrides?: Record<string, string>,
+): string {
+  const rootDir = getPlatformRootDir(platform, overrides);
+  const relativePath =
+    getBuiltinAgentOverride(platform.id)?.pluginsRelativePath ||
+    getDefaultPluginsRelativePath(platform.id);
+
+  if (!relativePath) {
+    throw new Error(`${platform.name} does not support Agent Plugin packages`);
+  }
+
   return joinRootRelativePath(rootDir, relativePath);
 }
 

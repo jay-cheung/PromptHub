@@ -330,12 +330,22 @@ function triggerBlobDownload(blob: Blob, fileName: string): void {
   a.download = fileName;
   a.rel = "noopener";
   document.body.appendChild(a);
-  a.click();
 
-  setTimeout(() => {
-    document.body.removeChild(a);
+  const cleanup = () => {
+    if (a.isConnected) {
+      document.body.removeChild(a);
+    }
     URL.revokeObjectURL(url);
-  }, 1000);
+  };
+
+  try {
+    a.click();
+  } catch (error) {
+    cleanup();
+    throw error;
+  }
+
+  setTimeout(cleanup, 1000);
 }
 
 async function gunzipToText(blob: Blob): Promise<string> {
@@ -939,6 +949,13 @@ export function formatBackupImportError(error: unknown): string {
     return "不是 PromptHub 可识别的备份文件，请选择 PromptHub 导出的 JSON、PHUB 或 ZIP 文件。";
   }
 
+  if (
+    normalizedMessage.includes("unexpected end of json input") ||
+    normalizedMessage.includes("unterminated string")
+  ) {
+    return "备份文件不是完整 JSON，可能在导出、复制或上传过程中被截断。请重新从 PromptHub 导出完整的 JSON、PHUB 或 ZIP 文件后再导入。";
+  }
+
   if (normalizedMessage.includes("imported backup is empty")) {
     return "该备份内容为空。为避免覆盖当前数据，PromptHub 已阻止这次导入。";
   }
@@ -952,7 +969,7 @@ export function formatBackupImportError(error: unknown): string {
   }
 
   if (normalizedMessage.includes("file errors:")) {
-    return `导入部分完成，但有附件或技能文件恢复失败。${message}`;
+    return `导入部分完成，但有附件或 Skill 文件恢复失败。${message}`;
   }
 
   return message || "导入失败，请检查备份文件是否完整后重试。";

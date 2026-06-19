@@ -21,13 +21,10 @@ import {
   CheckSquareIcon,
   SquareIcon,
 } from "lucide-react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
-import rehypeSanitize from "rehype-sanitize";
-import rehypeHighlight from "rehype-highlight";
 import { useSkillStore } from "../../stores/skill.store";
 import { useSettingsStore } from "../../stores/settings.store";
 import { loadGitHubSkillRepo } from "../../services/github-skill-store";
+import { findInstalledRegistrySkill } from "../../services/skill-store-update";
 import { isGitHubHost, parseGitRepo } from "@prompthub/shared/utils/git-repo";
 import {
   generateSkillContent,
@@ -37,8 +34,14 @@ import {
 import { BUILTIN_SKILL_REGISTRY } from "@prompthub/shared/constants/skill-registry";
 import { UnsavedChangesDialog } from "../ui/UnsavedChangesDialog";
 import { SkillIconPicker } from "./SkillIconPicker";
+import { CreateSkillScanSourceChooser } from "./CreateSkillScanSourceChooser";
+import { SkillMarkdown } from "./SkillMarkdown";
 import { getExistingSkillTags } from "./skill-modal-utils";
-import type { RegistrySkill, ScannedSkill } from "@prompthub/shared/types/skill";
+import { matchScannedSkillToLibrary } from "../../services/skill-scan-status";
+import type {
+  RegistrySkill,
+  ScannedSkill,
+} from "@prompthub/shared/types/skill";
 import { getRuntimeCapabilities } from "../../runtime";
 
 interface CreateSkillModalProps {
@@ -52,19 +55,45 @@ function sanitizeSkillName(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9-]/g, "");
 }
 
-function getRegistrySelectionKey(skill: Pick<RegistrySkill, "source_id" | "source_url" | "slug">): string {
+function getRegistrySelectionKey(
+  skill: Pick<RegistrySkill, "source_id" | "source_url" | "slug">,
+): string {
   return skill.source_id || skill.source_url || skill.slug;
 }
 
-function isRegistrySkillInstalled(
-  skill: Pick<RegistrySkill, "source_id" | "source_url" | "slug">,
-  installedKeys: Set<string>,
-): boolean {
-  return Boolean(
-    (skill.source_id && installedKeys.has(skill.source_id)) ||
-      (skill.source_url && installedKeys.has(skill.source_url)) ||
-      installedKeys.has(getRegistrySelectionKey(skill)),
-  );
+function yamlQuote(value: string): string {
+  return JSON.stringify(value);
+}
+
+function buildStarterSkillContent(name: string, description: string): string {
+  const safeDescription =
+    description.trim() || `Use when the user asks for the ${name} workflow.`;
+  return [
+    "---",
+    `name: ${name}`,
+    `description: ${yamlQuote(safeDescription)}`,
+    "---",
+    "",
+    `# ${name}`,
+    "",
+    "## When to use",
+    "",
+    `Use this skill when ${safeDescription}`,
+    "",
+    "## Workflow",
+    "",
+    "1. Confirm the user's goal, inputs, constraints, and expected output.",
+    "2. Inspect any relevant files, references, or existing project rules before acting.",
+    "3. Execute the smallest reliable workflow that satisfies the request.",
+    "4. Verify the result with a concrete command, file check, or observable output.",
+    "",
+    "## Package notes",
+    "",
+    "- Keep SKILL.md focused on the core workflow.",
+    "- Put detailed reference material in references/ when it grows beyond the immediate workflow.",
+    "- Put deterministic helper code in scripts/ when repeated execution matters.",
+    "- Put templates or reusable output files in assets/.",
+  ].join("\n");
 }
 
 export function CreateSkillModal({ isOpen, onClose }: CreateSkillModalProps) {
@@ -77,6 +106,8 @@ export function CreateSkillModal({ isOpen, onClose }: CreateSkillModalProps) {
   const importScannedSkills = useSkillStore(
     (state) => state.importScannedSkills,
   );
+  const selectSkill = useSkillStore((state) => state.selectSkill);
+  const setStoreView = useSkillStore((state) => state.setStoreView);
   const existingSkills = useSkillStore((state) => state.skills);
 
   // AI settings for generation
@@ -91,12 +122,17 @@ export function CreateSkillModal({ isOpen, onClose }: CreateSkillModalProps) {
 
   // GitHub mode
   const [githubUrl, setGithubUrl] = useState("");
-  const [githubScanResults, setGithubScanResults] = useState<RegistrySkill[]>([]);
+  const [githubScanResults, setGithubScanResults] = useState<RegistrySkill[]>(
+    [],
+  );
   const [selectedGitHubSkills, setSelectedGitHubSkills] = useState<Set<string>>(
     new Set(),
   );
   const [githubScanDone, setGithubScanDone] = useState(false);
-  const [githubImportNotice, setGithubImportNotice] = useState<string | null>(null);
+  const [lastScannedGithubUrl, setLastScannedGithubUrl] = useState("");
+  const [githubImportNotice, setGithubImportNotice] = useState<string | null>(
+    null,
+  );
 
   // Manual mode
   const [name, setName] = useState("");
@@ -131,6 +167,7 @@ export function CreateSkillModal({ isOpen, onClose }: CreateSkillModalProps) {
   const [importingCount, setImportingCount] = useState(0);
   const [scanImportNotice, setScanImportNotice] = useState<string | null>(null);
   const [scanSearchQuery, setScanSearchQuery] = useState("");
+  const [scanRootPaths, setScanRootPaths] = useState<string[]>([]);
   const [showScanOptionalTags, setShowScanOptionalTags] = useState(false);
   const [scanTagDrafts, setScanTagDrafts] = useState<Record<string, string[]>>(
     {},
@@ -139,23 +176,12 @@ export function CreateSkillModal({ isOpen, onClose }: CreateSkillModalProps) {
     {},
   );
 
-  const installedScanPaths = useMemo(() => {
-    return new Set(
-      existingSkills.flatMap((skill) =>
-        [skill.source_url, skill.local_repo_path].filter(
-          (value): value is string =>
-            typeof value === "string" && value.trim().length > 0,
-        ),
-      ),
-    );
-  }, [existingSkills]);
-
   const annotatedScanResults = useMemo(() => {
     return scanResults.map((skill) => ({
       ...skill,
-      isImported: installedScanPaths.has(skill.localPath),
+      isImported: Boolean(matchScannedSkillToLibrary(skill, existingSkills)),
     }));
-  }, [installedScanPaths, scanResults]);
+  }, [existingSkills, scanResults]);
 
   const selectableScanResults = useMemo(
     () => annotatedScanResults.filter((skill) => !skill.isImported),
@@ -188,25 +214,21 @@ export function CreateSkillModal({ isOpen, onClose }: CreateSkillModalProps) {
     () => getExistingSkillTags(existingSkills),
     [existingSkills],
   );
-  const installedGitHubSources = useMemo(() => {
-    return new Set(
-      existingSkills.flatMap((skill) =>
-        [skill.source_id, skill.source_url].filter(
-          (value): value is string =>
-            typeof value === "string" && value.trim().length > 0,
-        ),
-      ),
-    );
-  }, [existingSkills]);
   const annotatedGitHubResults = useMemo(() => {
     return githubScanResults.map((skill) => ({
       ...skill,
-      isImported: isRegistrySkillInstalled(skill, installedGitHubSources),
+      isImported: Boolean(findInstalledRegistrySkill(existingSkills, skill)),
     }));
-  }, [githubScanResults, installedGitHubSources]);
+  }, [existingSkills, githubScanResults]);
   const selectableGitHubResults = useMemo(
     () => annotatedGitHubResults.filter((skill) => !skill.isImported),
     [annotatedGitHubResults],
+  );
+  const normalizedGithubUrl = githubUrl.trim();
+  const githubScanNeedsRefresh = Boolean(
+    lastScannedGithubUrl &&
+      normalizedGithubUrl &&
+      normalizedGithubUrl !== lastScannedGithubUrl,
   );
 
   // Get default chat model for AI generation
@@ -256,6 +278,23 @@ export function CreateSkillModal({ isOpen, onClose }: CreateSkillModalProps) {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [isOpen, isNativeFullscreen, handleExitNativeFullscreen]);
 
+  const resetGitHubImportState = useCallback(
+    (options?: { preserveUrl?: boolean; preserveLastScannedUrl?: boolean }) => {
+      setError(null);
+      setGithubScanResults([]);
+      setSelectedGitHubSkills(new Set());
+      setGithubScanDone(false);
+      setGithubImportNotice(null);
+      if (!options?.preserveUrl) {
+        setGithubUrl("");
+      }
+      if (!options?.preserveLastScannedUrl) {
+        setLastScannedGithubUrl("");
+      }
+    },
+    [],
+  );
+
   if (!isOpen) return null;
 
   const hasUnsavedChanges = () => {
@@ -281,11 +320,7 @@ export function CreateSkillModal({ isOpen, onClose }: CreateSkillModalProps) {
     setMode("select");
     setError(null);
     setShowUnsavedDialog(false);
-    setGithubUrl("");
-    setGithubScanResults([]);
-    setSelectedGitHubSkills(new Set());
-    setGithubScanDone(false);
-    setGithubImportNotice(null);
+    resetGitHubImportState();
     setName("");
     setDescription("");
     setInstructions("");
@@ -306,9 +341,15 @@ export function CreateSkillModal({ isOpen, onClose }: CreateSkillModalProps) {
     setScanDone(false);
     setImportingCount(0);
     setScanImportNotice(null);
+    setScanRootPaths([]);
     setScanTagDrafts({});
     setScanTagInputs({});
     onClose();
+  };
+
+  const enterGitHubMode = () => {
+    resetGitHubImportState();
+    setMode("github");
   };
 
   // MD file upload handler
@@ -470,7 +511,7 @@ export function CreateSkillModal({ isOpen, onClose }: CreateSkillModalProps) {
   };
 
   const handleGitHubInstall = async () => {
-    if (!githubUrl.trim()) {
+    if (!normalizedGithubUrl) {
       setError(t("skill.enterGithubUrl", "Please enter a Git repository URL"));
       return;
     }
@@ -478,37 +519,40 @@ export function CreateSkillModal({ isOpen, onClose }: CreateSkillModalProps) {
     setIsLoading(true);
     setError(null);
 
+    let parsedRepo: ReturnType<typeof parseGitRepo> | null = null;
     try {
-      const parsedRepo = parseGitRepo(githubUrl.trim());
+      parsedRepo = parseGitRepo(normalizedGithubUrl);
       if (!parsedRepo) {
         throw new Error(
           t("skill.invalidGithubUrl", "Invalid Git repository URL format"),
         );
       }
 
-      const scannedSkills = !isGitHubHost(parsedRepo.host) || parsedRepo.protocol === "ssh"
-        ? await window.api.skill.scanRemoteGithub(
-            githubUrl.trim(),
-            BUILTIN_SKILL_REGISTRY,
-          )
-        : await loadGitHubSkillRepo(githubUrl.trim(), {
-            branch: undefined,
-            directory: undefined,
-            fetchRemoteContent: (url) => window.api.skill.fetchRemoteContent(url),
-            registrySkills: BUILTIN_SKILL_REGISTRY,
-            rateLimitMessage: t(
-              "skill.remoteStoreRateLimitHint",
-              "GitHub API rate limit reached. Try again in a few minutes, or switch to another network and retry.",
-            ),
-            networkMessage: t(
-              "skill.remoteStoreNetworkHint",
-              "Failed to reach GitHub. Check your network connection or switch to another network and retry.",
-            ),
-            invalidRepoMessage: t(
-              "skill.remoteStoreInvalidRepoHint",
-              "Repository not found or URL is invalid. Check the GitHub repository address and try again.",
-            ),
-          });
+      const scannedSkills =
+        !isGitHubHost(parsedRepo.host) || parsedRepo.protocol === "ssh"
+          ? await window.api.skill.scanRemoteGithub(
+              normalizedGithubUrl,
+              BUILTIN_SKILL_REGISTRY,
+            )
+          : await loadGitHubSkillRepo(normalizedGithubUrl, {
+              branch: undefined,
+              directory: undefined,
+              fetchRemoteContent: (url) =>
+                window.api.skill.fetchRemoteContent(url),
+              registrySkills: BUILTIN_SKILL_REGISTRY,
+              rateLimitMessage: t(
+                "skill.remoteStoreRateLimitHint",
+                "GitHub API rate limit reached. Try again in a few minutes, or switch this repository URL to SSH to avoid the anonymous API limit.",
+              ),
+              networkMessage: t(
+                "skill.remoteStoreNetworkHint",
+                "Failed to reach GitHub. Check your network connection or switch to another network and retry.",
+              ),
+              invalidRepoMessage: t(
+                "skill.remoteStoreInvalidRepoHint",
+                "Repository not found or URL is invalid. Check the GitHub repository address and try again.",
+              ),
+            });
 
       if (scannedSkills.length === 0) {
         throw new Error(
@@ -523,17 +567,29 @@ export function CreateSkillModal({ isOpen, onClose }: CreateSkillModalProps) {
       setSelectedGitHubSkills(
         new Set(
           scannedSkills
-            .filter((skill) => !isRegistrySkillInstalled(skill, installedGitHubSources))
+            .filter(
+              (skill) =>
+                !findInstalledRegistrySkill(existingSkills, skill),
+            )
             .map((skill) => getRegistrySelectionKey(skill)),
         ),
       );
       setGithubScanDone(true);
+      setLastScannedGithubUrl(normalizedGithubUrl);
       setGithubImportNotice(null);
     } catch (err) {
-      setError(
+      const message =
         err instanceof Error
           ? err.message
-          : t("skill.installFailed", "Failed to install from GitHub"),
+          : t("skill.installFailed", "Failed to install from GitHub");
+      setError(
+        parsedRepo?.protocol !== "ssh" &&
+          message.includes("GitHub API rate limit reached")
+          ? t(
+              "skill.remoteStoreRateLimitHint",
+              "GitHub API rate limit reached. Try again in a few minutes, or switch this repository URL to SSH to avoid the anonymous API limit.",
+            )
+          : message,
       );
     } finally {
       setIsLoading(false);
@@ -554,7 +610,9 @@ export function CreateSkillModal({ isOpen, onClose }: CreateSkillModalProps) {
 
   const handleImportSelectedGitHubSkills = async () => {
     const targets = annotatedGitHubResults.filter(
-      (skill) => !skill.isImported && selectedGitHubSkills.has(getRegistrySelectionKey(skill)),
+      (skill) =>
+        !skill.isImported &&
+        selectedGitHubSkills.has(getRegistrySelectionKey(skill)),
     );
     if (targets.length === 0) {
       return;
@@ -619,11 +677,14 @@ export function CreateSkillModal({ isOpen, onClose }: CreateSkillModalProps) {
     setError(null);
 
     try {
+      const skillInstructions = instructions.trim()
+        ? instructions
+        : buildStarterSkillContent(normalizedName, description);
       const createdSkill = await createSkill({
         name: normalizedName,
         description,
-        instructions,
-        content: instructions,
+        instructions: skillInstructions,
+        content: skillInstructions,
         protocol_type: "skill",
         is_favorite: false,
         tags,
@@ -655,9 +716,24 @@ export function CreateSkillModal({ isOpen, onClose }: CreateSkillModalProps) {
     }
   };
 
+  const handleImportFromAgentSkills = () => {
+    setStoreView("agents");
+    selectSkill(null);
+    handleClose();
+  };
+
+  const handleChooseLocalSkillFolder = async () => {
+    const selectedFolder = await window.electron?.selectFolder?.();
+    if (!selectedFolder) {
+      return;
+    }
+    await handleScanLocal([selectedFolder]);
+  };
+
   // Scan local skills (preview mode - returns list for user to select)
   // 扫描本地技能（预览模式 - 返回列表供用户选择）
-  const handleScanLocal = async () => {
+  const handleScanLocal = async (customPaths: string[]) => {
+    setScanRootPaths(customPaths);
     setIsScanning(true);
     setScanDone(false);
     setError(null);
@@ -669,16 +745,16 @@ export function CreateSkillModal({ isOpen, onClose }: CreateSkillModalProps) {
 
     try {
       const allResults: ScannedSkill[] =
-        await window.api.skill.scanLocalPreview();
-      const installedCount = allResults.filter((skill) =>
-        installedScanPaths.has(skill.localPath),
-      ).length;
+        await window.api.skill.scanLocalPreview(customPaths);
+      const isScannedSkillImported = (skill: ScannedSkill) =>
+        Boolean(matchScannedSkillToLibrary(skill, existingSkills));
+      const installedCount = allResults.filter(isScannedSkillImported).length;
 
       setScanResults(allResults);
       setSelectedScanItems(
         new Set(
           allResults
-            .filter((skill) => !installedScanPaths.has(skill.localPath))
+            .filter((skill) => !isScannedSkillImported(skill))
             .map((skill) => skill.filePath),
         ),
       );
@@ -849,20 +925,23 @@ export function CreateSkillModal({ isOpen, onClose }: CreateSkillModalProps) {
           </div>
           <div className="flex items-center gap-3">
             <button
+              type="button"
               onClick={() => fileInputRef.current?.click()}
               className="flex items-center gap-2 px-4 py-2 rounded-lg hover:bg-muted text-sm font-medium transition-colors"
             >
-              <UploadIcon className="w-4 h-4" />
+              <UploadIcon className="w-4 h-4" aria-hidden="true" />
               {t("skill.uploadMd", "Upload .md")}
             </button>
             <button
+              type="button"
               onClick={handleExitNativeFullscreen}
               className="flex items-center gap-2 px-4 py-2 rounded-lg hover:bg-muted text-sm font-medium transition-colors"
             >
-              <Minimize2Icon className="w-4 h-4" />
+              <Minimize2Icon className="w-4 h-4" aria-hidden="true" />
               {t("common.exitFullscreen", "Exit Fullscreen")}
             </button>
             <button
+              type="button"
               onClick={() => {
                 handleManualCreate();
                 handleExitNativeFullscreen();
@@ -870,7 +949,7 @@ export function CreateSkillModal({ isOpen, onClose }: CreateSkillModalProps) {
               disabled={isLoading || !name.trim()}
               className="flex items-center gap-2 px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm font-medium hover:bg-primary/90 disabled:opacity-50 transition-colors"
             >
-              <SaveIcon className="w-4 h-4" />
+              <SaveIcon className="w-4 h-4" aria-hidden="true" />
               {t("skill.create", "Create")}
             </button>
           </div>
@@ -900,12 +979,7 @@ export function CreateSkillModal({ isOpen, onClose }: CreateSkillModalProps) {
             <div className="flex-1 overflow-auto p-6">
               <div className="prose prose-sm dark:prose-invert max-w-none">
                 {instructions ? (
-                  <ReactMarkdown
-                    remarkPlugins={[remarkGfm]}
-                    rehypePlugins={[rehypeHighlight, rehypeSanitize]}
-                  >
-                    {instructions}
-                  </ReactMarkdown>
+                  <SkillMarkdown content={instructions} enableHighlight />
                 ) : (
                   <div className="text-muted-foreground text-sm italic">
                     {t("skill.noContent", "No content")}
@@ -919,6 +993,7 @@ export function CreateSkillModal({ isOpen, onClose }: CreateSkillModalProps) {
         <input
           ref={fileInputRef}
           type="file"
+          aria-label={t("skill.uploadMd", "Upload .md")}
           accept=".md,.markdown,.txt"
           className="hidden"
           onChange={handleFileUpload}
@@ -937,6 +1012,9 @@ export function CreateSkillModal({ isOpen, onClose }: CreateSkillModalProps) {
     <div className="fixed inset-0 z-[100] flex items-center justify-center">
       {/* Backdrop */}
       <div
+        data-testid="create-skill-backdrop"
+        role="presentation"
+        aria-hidden="true"
         className="absolute inset-0 bg-black/50 backdrop-blur-sm"
         onClick={handleCloseRequest}
       />
@@ -950,10 +1028,10 @@ export function CreateSkillModal({ isOpen, onClose }: CreateSkillModalProps) {
               ? "w-[95vw] h-[95vh]"
               : "w-full max-w-2xl max-h-[90vh]"
             : isGitHubMode
-              ? "w-full max-w-4xl max-h-[90vh]"
-              : isScanMode && hasScanResults
               ? "w-[min(92vw,1100px)] max-h-[92vh]"
-              : "w-full max-w-lg max-h-[90vh]"
+              : isScanMode && hasScanResults
+                ? "w-[min(92vw,1100px)] max-h-[92vh]"
+                : "w-full max-w-lg max-h-[90vh]"
         } min-h-0`}
       >
         {/* Header */}
@@ -975,8 +1053,14 @@ export function CreateSkillModal({ isOpen, onClose }: CreateSkillModalProps) {
           <div className="flex items-center gap-2">
             {mode === "manual" && (
               <button
+                type="button"
                 onClick={() => setIsFullscreen(!isFullscreen)}
                 className="p-2 text-muted-foreground hover:text-foreground hover:bg-accent rounded-lg transition-colors"
+                aria-label={
+                  isFullscreen
+                    ? t("common.exitFullscreen", "Exit Fullscreen")
+                    : t("common.fullscreen", "Fullscreen")
+                }
                 title={
                   isFullscreen
                     ? t("common.exitFullscreen", "Exit Fullscreen")
@@ -984,17 +1068,19 @@ export function CreateSkillModal({ isOpen, onClose }: CreateSkillModalProps) {
                 }
               >
                 {isFullscreen ? (
-                  <Minimize2Icon className="w-4 h-4" />
+                  <Minimize2Icon className="w-4 h-4" aria-hidden="true" />
                 ) : (
-                  <Maximize2Icon className="w-4 h-4" />
+                  <Maximize2Icon className="w-4 h-4" aria-hidden="true" />
                 )}
               </button>
             )}
             <button
+              type="button"
               onClick={handleCloseRequest}
               className="p-2 text-muted-foreground hover:text-foreground hover:bg-accent rounded-lg transition-colors"
+              aria-label={t("common.close", "Close")}
             >
-              <XIcon className="w-4 h-4" />
+              <XIcon className="w-4 h-4" aria-hidden="true" />
             </button>
           </div>
         </div>
@@ -1026,11 +1112,12 @@ export function CreateSkillModal({ isOpen, onClose }: CreateSkillModalProps) {
 
               {/* AI Create Option */}
               <button
+                type="button"
                 onClick={() => setMode("ai")}
                 className="w-full flex items-center gap-4 p-4 bg-primary/5 hover:bg-primary/10 border border-primary/30 rounded-xl transition-colors group text-left"
               >
                 <div className="p-3 bg-primary rounded-lg">
-                  <BrainIcon className="w-6 h-6 text-white" />
+                  <BrainIcon className="w-6 h-6 text-white" aria-hidden="true" />
                 </div>
                 <div>
                   <h3 className="font-medium text-foreground flex items-center gap-2">
@@ -1050,29 +1137,43 @@ export function CreateSkillModal({ isOpen, onClose }: CreateSkillModalProps) {
 
               {/* GitHub Option */}
               <button
-                onClick={() => setMode("github")}
+                type="button"
+                onClick={enterGitHubMode}
                 className="w-full flex items-center gap-4 p-4 bg-accent/50 hover:bg-accent border border-border rounded-xl transition-colors group text-left"
               >
                 <div className="p-3 bg-background rounded-lg group-hover:bg-primary/10 transition-colors">
-                  <GithubIcon className="w-6 h-6 text-foreground" />
+                  <GithubIcon
+                    className="w-6 h-6 text-foreground"
+                    aria-hidden="true"
+                  />
                 </div>
                 <div>
                   <h3 className="font-medium text-foreground">
-                    {t("skill.installFromGithub", "Install from Git Repository")}
+                    {t(
+                      "skill.installFromGithub",
+                      "Install from Git Repository",
+                    )}
                   </h3>
                   <p className="text-sm text-muted-foreground">
-                    {t("skill.githubDesc", "Paste a GitHub, Gitea, or self-hosted Git repository URL")}
+                    {t(
+                      "skill.githubDesc",
+                      "Paste a GitHub, Gitea, or self-hosted Git repository URL",
+                    )}
                   </p>
                 </div>
               </button>
 
               {/* Manual Option */}
               <button
+                type="button"
                 onClick={() => setMode("manual")}
                 className="w-full flex items-center gap-4 p-4 bg-accent/50 hover:bg-accent border border-border rounded-xl transition-colors group text-left"
               >
                 <div className="p-3 bg-background rounded-lg group-hover:bg-primary/10 transition-colors">
-                  <EditIcon className="w-6 h-6 text-foreground" />
+                  <EditIcon
+                    className="w-6 h-6 text-foreground"
+                    aria-hidden="true"
+                  />
                 </div>
                 <div>
                   <h3 className="font-medium text-foreground">
@@ -1086,18 +1187,25 @@ export function CreateSkillModal({ isOpen, onClose }: CreateSkillModalProps) {
 
               {runtimeCapabilities.skillLocalScan && (
                 <button
+                  type="button"
                   onClick={() => setMode("scan")}
                   className="w-full flex items-center gap-4 p-4 bg-accent/50 hover:bg-accent border border-border rounded-xl transition-colors group text-left"
                 >
                   <div className="p-3 bg-background rounded-lg group-hover:bg-primary/10 transition-colors">
-                    <FolderOpenIcon className="w-6 h-6 text-foreground" />
+                    <FolderOpenIcon
+                      className="w-6 h-6 text-foreground"
+                      aria-hidden="true"
+                    />
                   </div>
                   <div>
                     <h3 className="font-medium text-foreground">
                       {t("skill.scanLocal", "Scan Local")}
                     </h3>
                     <p className="text-sm text-muted-foreground">
-                      {t("skill.scanLocalDesc", "Detect existing SKILL.md files")}
+                      {t(
+                        "skill.scanLocalDesc",
+                        "Detect existing SKILL.md files",
+                      )}
                     </p>
                   </div>
                 </button>
@@ -1107,30 +1215,79 @@ export function CreateSkillModal({ isOpen, onClose }: CreateSkillModalProps) {
 
           {isGitHubMode && (
             <div className="flex h-full min-h-0 flex-col gap-4">
-              <div>
+              <div
+                data-testid="github-mode-intro"
+                className="space-y-3"
+              >
                 <label className="block text-sm font-medium mb-2">
                   {t("skill.githubUrl", "Git Repository URL")}
                 </label>
-                <input
-                  type="text"
-                  value={githubUrl}
-                  onChange={(e) => setGithubUrl(e.target.value)}
-                  placeholder="https://github.com/owner/skill-repo"
-                  className="w-full px-4 py-2.5 bg-muted/50 border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
-                />
+                <div className="flex items-center gap-3">
+                  <input
+                    type="text"
+                    value={githubUrl}
+                    onChange={(e) => {
+                      const nextUrl = e.target.value;
+                      setGithubUrl(nextUrl);
+                      setError(null);
+                      if (githubScanDone || githubScanResults.length > 0) {
+                        setGithubScanResults([]);
+                        setSelectedGitHubSkills(new Set());
+                        setGithubScanDone(false);
+                        setGithubImportNotice(null);
+                      }
+                    }}
+                    placeholder="https://github.com/owner/skill-repo"
+                    className="w-full px-4 py-2.5 bg-muted/50 border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => void handleGitHubInstall()}
+                    disabled={isLoading || !normalizedGithubUrl}
+                    className="inline-flex h-11 shrink-0 items-center justify-center gap-2 rounded-lg border border-border px-4 text-sm font-medium text-foreground transition-colors hover:bg-accent disabled:opacity-50"
+                  >
+                    {isLoading ? (
+                      <LoaderIcon
+                        className="w-4 h-4 animate-spin"
+                        aria-hidden="true"
+                      />
+                    ) : (
+                      <SearchIcon className="w-4 h-4" aria-hidden="true" />
+                    )}
+                    {githubScanNeedsRefresh
+                      ? t("skill.rescanRepository", "Rescan Repository")
+                      : t("skill.scanRepository", "Scan Repository")}
+                  </button>
+                </div>
                 <p className="mt-2 text-xs text-muted-foreground">
                   {t(
                     "skill.githubUrlHint",
                     "Use the repository root URL. PromptHub supports GitHub, Gitea, and other self-hosted Git repositories over HTTPS or SSH, then scans the repo for importable SKILL.md entries before you choose what to import.",
                   )}
                 </p>
+                {githubScanNeedsRefresh && (
+                  <div className="rounded-lg border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
+                    {t(
+                      "skill.githubScanNeedsRefresh",
+                      "The repository URL changed. Scan again to refresh the import options.",
+                    )}
+                  </div>
+                )}
+                {hasGitHubResults ? (
+                  <div className="rounded-lg border border-border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                    {t(
+                      "skill.githubFallbackHint",
+                      "PromptHub will scan the repository for multiple SKILL.md entries. If none exist, it will fall back to the root README.md as a single import option.",
+                    )}
+                  </div>
+                ) : (
                   <div className="mt-3 rounded-lg border border-border bg-muted/20 p-3 text-xs text-muted-foreground space-y-1.5">
                     <p>
                       {t(
-                      "skill.githubConstraintHint",
-                      "Only repository root URLs are supported, such as https://github.com/owner/repo, https://gitea.example.com/owner/repo, or git@host:owner/repo.git",
-                    )}
-                  </p>
+                        "skill.githubConstraintHint",
+                        "Only repository root URLs are supported, such as https://github.com/owner/repo, https://gitea.example.com/owner/repo, or git@host:owner/repo.git",
+                      )}
+                    </p>
                     <p>
                       {t(
                         "skill.githubFallbackHint",
@@ -1138,139 +1295,164 @@ export function CreateSkillModal({ isOpen, onClose }: CreateSkillModalProps) {
                       )}
                     </p>
                   </div>
-                </div>
+                )}
+              </div>
 
-                {hasGitHubResults && (
-                  <div className="flex min-h-0 flex-1 flex-col space-y-3 rounded-xl border border-border bg-background/60 p-4">
-                    {githubImportNotice && (
-                      <div className="rounded-lg border border-primary/20 bg-primary/10 px-3 py-2 text-xs text-primary">
-                        {githubImportNotice}
-                      </div>
-                    )}
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <div className="text-sm font-medium text-foreground">
-                          {t(
-                            "skill.githubScanFound",
-                            "Found {{count}} import option(s)",
-                          ).replace(
-                            "{{count}}",
-                            String(annotatedGitHubResults.length),
-                          )}
-                        </div>
-                        <div className="text-xs text-muted-foreground mt-1">
-                          {t(
-                            "skill.githubScanHint",
-                            "Select one or more skills from this repository before importing.",
-                          )}
-                        </div>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const allSelected = selectableGitHubResults.every((skill) =>
-                            selectedGitHubSkills.has(getRegistrySelectionKey(skill)),
-                          );
-                          setSelectedGitHubSkills(
-                            allSelected
-                              ? new Set()
-                              : new Set(
-                                  selectableGitHubResults.map((skill) => getRegistrySelectionKey(skill)),
-                                ),
-                          );
-                        }}
-                        className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-accent rounded-md transition-colors"
-                      >
-                        {selectableGitHubResults.every((skill) =>
-                          selectedGitHubSkills.has(getRegistrySelectionKey(skill)),
-                        ) ? (
-                          <>
-                            <CheckSquareIcon className="w-3.5 h-3.5" />
-                            {t("skill.deselectAll", "Deselect All")}
-                          </>
-                        ) : (
-                          <>
-                            <SquareIcon className="w-3.5 h-3.5" />
-                            {t("skill.selectAll", "Select All")}
-                          </>
-                        )}
-                      </button>
+              {hasGitHubResults && (
+                <div className="flex min-h-0 flex-1 flex-col space-y-3 overflow-hidden rounded-xl border border-border bg-background/60 p-4">
+                  {githubImportNotice && (
+                    <div className="rounded-lg border border-primary/20 bg-primary/10 px-3 py-2 text-xs text-primary">
+                      {githubImportNotice}
                     </div>
-
-                    <div
-                      data-testid="github-results-scroll-area"
-                      className="min-h-0 flex-1 overflow-y-auto pr-1"
+                  )}
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <div className="text-sm font-medium text-foreground">
+                        {t(
+                          "skill.githubScanFound",
+                          "Found {{count}} import option(s)",
+                        ).replace(
+                          "{{count}}",
+                          String(annotatedGitHubResults.length),
+                        )}
+                      </div>
+                      <div className="text-xs text-muted-foreground mt-1">
+                        {t(
+                          "skill.githubScanHint",
+                          "Select one or more skills from this repository before importing.",
+                        )}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const allSelected = selectableGitHubResults.every(
+                          (skill) =>
+                            selectedGitHubSkills.has(
+                              getRegistrySelectionKey(skill),
+                            ),
+                        );
+                        setSelectedGitHubSkills(
+                          allSelected
+                            ? new Set()
+                            : new Set(
+                                selectableGitHubResults.map((skill) =>
+                                  getRegistrySelectionKey(skill),
+                                ),
+                              ),
+                        );
+                      }}
+                      className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-accent rounded-md transition-colors"
                     >
-                      <div className="grid grid-cols-1 gap-3">
-                        {annotatedGitHubResults.map((skill) => {
-                          const selectionKey = getRegistrySelectionKey(skill);
-                          const isSelected = selectedGitHubSkills.has(selectionKey);
-                          return (
-                            <button
-                              key={selectionKey}
-                              type="button"
-                              onClick={() =>
-                                !skill.isImported && toggleGitHubSkill(selectionKey)
-                              }
-                              disabled={skill.isImported}
-                              className={`w-full rounded-2xl border p-4 text-left transition-all shadow-sm ${
-                                skill.isImported
-                                  ? "border-border bg-muted/30 opacity-70 cursor-not-allowed"
-                                  : isSelected
-                                    ? "border-primary/40 bg-primary/5 shadow-primary/10"
-                                    : "border-border app-wallpaper-surface hover:border-primary/30 hover:shadow-md"
-                              }`}
-                            >
-                              <div className="flex items-start gap-3">
-                                <div
-                                  className={`mt-0.5 flex h-10 w-10 items-center justify-center rounded-xl ${
-                                    skill.isImported
-                                      ? "bg-accent text-muted-foreground"
-                                      : "bg-primary/10 text-primary"
-                                  }`}
-                                >
-                                  <FileTextIcon className="w-5 h-5" />
-                                </div>
-                                <div className="min-w-0 flex-1">
-                                  <div className="flex items-start justify-between gap-3">
-                                    <div className="min-w-0">
-                                      <div className="flex items-center gap-2 flex-wrap">
-                                        <h4 className="font-semibold text-sm truncate">
-                                          {skill.name}
-                                        </h4>
-                                        {skill.isImported && (
-                                          <span className="inline-flex items-center px-1.5 py-0.5 text-[10px] rounded bg-accent text-muted-foreground shrink-0">
-                                            {t(
-                                              "skill.importedBadge",
-                                              "Already Imported",
-                                            )}
-                                          </span>
-                                        )}
-                                      </div>
-                                      <p className="mt-1 text-[11px] text-muted-foreground break-all">
-                                        {skill.source_url}
-                                      </p>
-                                    </div>
-                                    <div className="shrink-0 pt-0.5">
-                                      {skill.isImported || isSelected ? (
-                                        <CheckSquareIcon className="w-4 h-4 text-primary" />
-                                      ) : (
-                                        <SquareIcon className="w-4 h-4 text-muted-foreground" />
+                      {selectableGitHubResults.every((skill) =>
+                        selectedGitHubSkills.has(
+                          getRegistrySelectionKey(skill),
+                        ),
+                      ) ? (
+                        <>
+                          <CheckSquareIcon
+                            aria-hidden="true"
+                            className="w-3.5 h-3.5"
+                          />
+                          {t("skill.deselectAll", "Deselect All")}
+                        </>
+                      ) : (
+                        <>
+                          <SquareIcon
+                            aria-hidden="true"
+                            className="w-3.5 h-3.5"
+                          />
+                          {t("skill.selectAll", "Select All")}
+                        </>
+                      )}
+                    </button>
+                  </div>
+
+                  <div
+                    data-testid="github-results-scroll-area"
+                    className="min-h-[24rem] flex-1 overflow-y-auto pr-2"
+                  >
+                    <div className="grid grid-cols-1 gap-3">
+                      {annotatedGitHubResults.map((skill) => {
+                        const selectionKey = getRegistrySelectionKey(skill);
+                        const isSelected =
+                          selectedGitHubSkills.has(selectionKey);
+                        return (
+                          <button
+                            key={selectionKey}
+                            type="button"
+                            onClick={() =>
+                              !skill.isImported &&
+                              toggleGitHubSkill(selectionKey)
+                            }
+                            disabled={skill.isImported}
+                            className={`w-full rounded-2xl border p-3.5 text-left transition-all shadow-sm ${
+                              skill.isImported
+                                ? "border-border bg-muted/30 opacity-70 cursor-not-allowed"
+                                : isSelected
+                                  ? "border-primary/40 bg-primary/5 shadow-primary/10"
+                                  : "border-border app-wallpaper-surface hover:border-primary/30 hover:shadow-md"
+                            }`}
+                          >
+                            <div className="flex items-start gap-3">
+                              <div
+                                className={`mt-0.5 flex h-9 w-9 items-center justify-center rounded-xl ${
+                                  skill.isImported
+                                    ? "bg-accent text-muted-foreground"
+                                    : "bg-primary/10 text-primary"
+                                }`}
+                              >
+                                <FileTextIcon
+                                  aria-hidden="true"
+                                  className="w-5 h-5"
+                                />
+                              </div>
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-start justify-between gap-3">
+                                  <div className="min-w-0">
+                                    <div className="flex items-center gap-2 flex-wrap">
+                                      <h4 className="font-semibold text-sm truncate">
+                                        {skill.name}
+                                      </h4>
+                                      {skill.isImported && (
+                                        <span className="inline-flex items-center px-1.5 py-0.5 text-[10px] rounded bg-accent text-muted-foreground shrink-0">
+                                          {t(
+                                            "skill.importedBadge",
+                                            "Already Imported",
+                                          )}
+                                        </span>
                                       )}
                                     </div>
-                                  </div>
-                                  <p className="mt-3 text-xs leading-5 text-muted-foreground line-clamp-3">
-                                    {skill.description}
+                                    <p className="mt-1 text-[11px] text-muted-foreground break-all">
+                                    {skill.source_url}
                                   </p>
+                                  </div>
+                                  <div className="shrink-0 pt-0.5">
+                                    {skill.isImported || isSelected ? (
+                                      <CheckSquareIcon
+                                        aria-hidden="true"
+                                        className="w-4 h-4 text-primary"
+                                      />
+                                    ) : (
+                                      <SquareIcon
+                                        aria-hidden="true"
+                                        className="w-4 h-4 text-muted-foreground"
+                                      />
+                                    )}
+                                    </div>
                                 </div>
+                                <p className="mt-2.5 text-xs leading-5 text-muted-foreground line-clamp-2">
+                                  {skill.description}
+                                </p>
                               </div>
-                            </button>
-                          );
-                        })}
-                      </div>
+                            </div>
+                          </button>
+                        );
+                      })}
                     </div>
                   </div>
-                )}
+                </div>
+              )}
             </div>
           )}
 
@@ -1371,14 +1553,14 @@ export function CreateSkillModal({ isOpen, onClose }: CreateSkillModalProps) {
                       key={tag}
                       className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium bg-primary text-white"
                     >
-                      <HashIcon className="w-3 h-3" />
+                      <HashIcon aria-hidden="true" className="w-3 h-3" />
                       {tag}
                       <button
                         type="button"
                         onClick={() => handleRemoveTag(tag)}
                         className="ml-1 hover:text-white/70"
                       >
-                        <XIcon className="w-3 h-3" />
+                        <XIcon aria-hidden="true" className="w-3 h-3" />
                       </button>
                     </span>
                   ))}
@@ -1398,7 +1580,7 @@ export function CreateSkillModal({ isOpen, onClose }: CreateSkillModalProps) {
                             onClick={() => setTags([...tags, existingTag])}
                             className="inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium bg-muted hover:bg-accent transition-colors"
                           >
-                            <HashIcon className="w-3 h-3" />
+                            <HashIcon aria-hidden="true" className="w-3 h-3" />
                             {existingTag}
                           </button>
                         ))}
@@ -1437,14 +1619,16 @@ export function CreateSkillModal({ isOpen, onClose }: CreateSkillModalProps) {
                   <div className="flex items-center gap-2">
                     {/* Upload MD button */}
                     <button
+                      type="button"
                       onClick={() => fileInputRef.current?.click()}
                       className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-border hover:bg-accent transition-colors"
                     >
-                      <UploadIcon className="w-3.5 h-3.5" />
+                      <UploadIcon className="w-3.5 h-3.5" aria-hidden="true" />
                       {t("skill.uploadMd", "Upload .md")}
                     </button>
                     {/* AI Polish Button */}
                     <button
+                      type="button"
                       onClick={handleAIPolish}
                       disabled={
                         isGenerating ||
@@ -1472,11 +1656,18 @@ export function CreateSkillModal({ isOpen, onClose }: CreateSkillModalProps) {
                                 "Polish content to SKILL.md standard format",
                               )
                       }
+                      aria-label={t("skill.aiPolish", "AI Polish")}
                     >
                       {isGenerating ? (
-                        <LoaderIcon className="w-3.5 h-3.5 animate-spin" />
+                        <LoaderIcon
+                          className="w-3.5 h-3.5 animate-spin"
+                          aria-hidden="true"
+                        />
                       ) : (
-                        <SparklesIcon className="w-3.5 h-3.5" />
+                        <SparklesIcon
+                          className="w-3.5 h-3.5"
+                          aria-hidden="true"
+                        />
                       )}
                       {isGenerating
                         ? t("skill.polishing", "Polishing...")
@@ -1485,6 +1676,7 @@ export function CreateSkillModal({ isOpen, onClose }: CreateSkillModalProps) {
                     {/* Edit/Preview tabs */}
                     <div className="flex items-center gap-1 rounded-lg border border-border bg-muted/50 p-1">
                       <button
+                        type="button"
                         onClick={() => setInstrTab("edit")}
                         className={`px-3 py-1 rounded-md text-xs font-medium transition-colors ${
                           instrTab === "edit"
@@ -1495,6 +1687,7 @@ export function CreateSkillModal({ isOpen, onClose }: CreateSkillModalProps) {
                         {t("prompt.edit", "Edit")}
                       </button>
                       <button
+                        type="button"
                         onClick={() => setInstrTab("preview")}
                         className={`px-3 py-1 rounded-md text-xs font-medium transition-colors ${
                           instrTab === "preview"
@@ -1507,11 +1700,13 @@ export function CreateSkillModal({ isOpen, onClose }: CreateSkillModalProps) {
                     </div>
                     {/* Fullscreen button */}
                     <button
+                      type="button"
                       onClick={handleEnterNativeFullscreen}
                       className="p-1.5 rounded-lg hover:bg-muted text-muted-foreground hover:text-foreground transition-colors border border-border"
+                      aria-label={t("common.fullscreen", "Fullscreen Edit")}
                       title={t("common.fullscreen", "Fullscreen Edit")}
                     >
-                      <Maximize2Icon className="w-4 h-4" />
+                      <Maximize2Icon className="w-4 h-4" aria-hidden="true" />
                     </button>
                   </div>
                 </div>
@@ -1546,12 +1741,7 @@ export function CreateSkillModal({ isOpen, onClose }: CreateSkillModalProps) {
                   >
                     {instructions ? (
                       <div className="prose prose-sm dark:prose-invert max-w-none">
-                        <ReactMarkdown
-                          remarkPlugins={[remarkGfm]}
-                          rehypePlugins={[rehypeHighlight, rehypeSanitize]}
-                        >
-                          {instructions}
-                        </ReactMarkdown>
+                        <SkillMarkdown content={instructions} enableHighlight />
                       </div>
                     ) : (
                       <div className="text-muted-foreground text-sm italic">
@@ -1572,6 +1762,7 @@ export function CreateSkillModal({ isOpen, onClose }: CreateSkillModalProps) {
               <input
                 ref={fileInputRef}
                 type="file"
+                aria-label={t("skill.uploadMd", "Upload .md")}
                 accept=".md,.markdown,.txt"
                 className="hidden"
                 onChange={handleFileUpload}
@@ -1642,12 +1833,14 @@ export function CreateSkillModal({ isOpen, onClose }: CreateSkillModalProps) {
 
               <div className="flex gap-2 pt-2">
                 <button
+                  type="button"
                   onClick={() => setMode("select")}
                   className="flex-1 px-4 py-2.5 text-sm font-medium text-muted-foreground hover:text-foreground hover:bg-accent rounded-lg transition-colors"
                 >
                   {t("common.back", "Back")}
                 </button>
                 <button
+                  type="button"
                   onClick={handleAICreate}
                   disabled={
                     isGenerating ||
@@ -1658,9 +1851,12 @@ export function CreateSkillModal({ isOpen, onClose }: CreateSkillModalProps) {
                   className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 bg-primary text-primary-foreground text-sm font-medium rounded-lg hover:bg-primary/90 disabled:opacity-50 transition-colors"
                 >
                   {isGenerating ? (
-                    <LoaderIcon className="w-4 h-4 animate-spin" />
+                    <LoaderIcon
+                      className="w-4 h-4 animate-spin"
+                      aria-hidden="true"
+                    />
                   ) : (
-                    <SparklesIcon className="w-4 h-4" />
+                    <SparklesIcon className="w-4 h-4" aria-hidden="true" />
                   )}
                   {isGenerating
                     ? t("skill.generating", "Generating...")
@@ -1674,32 +1870,12 @@ export function CreateSkillModal({ isOpen, onClose }: CreateSkillModalProps) {
             <div className="space-y-4">
               {/* Before scan or while scanning */}
               {!scanDone && (
-                <div className="text-center py-8">
-                  <FolderOpenIcon className="w-12 h-12 mx-auto mb-4 text-muted-foreground/30" />
-                  <h3 className="font-medium mb-2">
-                    {t("skill.scanLocalTitle", "Scan for Local Skills")}
-                  </h3>
-                  <p className="text-sm text-muted-foreground mb-4">
-                    {t(
-                      "skill.scanLocalHint",
-                      "Automatically detect SKILL.md files from Claude, Cursor, Windsurf and other AI tools.",
-                    )}
-                  </p>
-                  <button
-                    onClick={handleScanLocal}
-                    disabled={isScanning}
-                    className="inline-flex items-center gap-2 px-4 py-2.5 bg-primary text-primary-foreground text-sm font-medium rounded-lg hover:bg-primary/90 disabled:opacity-50 transition-colors"
-                  >
-                    {isScanning ? (
-                      <LoaderIcon className="w-4 h-4 animate-spin" />
-                    ) : (
-                      <SearchIcon className="w-4 h-4" />
-                    )}
-                    {isScanning
-                      ? t("skill.scanning", "Scanning...")
-                      : t("skill.startScan", "Start Scan")}
-                  </button>
-                </div>
+                <CreateSkillScanSourceChooser
+                  isScanning={isScanning}
+                  onChooseLocalFolder={handleChooseLocalSkillFolder}
+                  onImportFromAgents={handleImportFromAgentSkills}
+                  t={t}
+                />
               )}
 
               {/* Scan results */}
@@ -1770,7 +1946,7 @@ export function CreateSkillModal({ isOpen, onClose }: CreateSkillModalProps) {
                           : "border-border app-wallpaper-surface text-muted-foreground hover:text-foreground"
                       }`}
                     >
-                      <HashIcon className="h-4 w-4" />
+                      <HashIcon aria-hidden="true" className="h-4 w-4" />
                       {showScanOptionalTags
                         ? t("skill.hideOptionalTags", "隐藏可选标签")
                         : t("skill.showOptionalTags", "需要时再加标签")}
@@ -1787,6 +1963,7 @@ export function CreateSkillModal({ isOpen, onClose }: CreateSkillModalProps) {
                     </p>
                     {visibleSelectableScanResults.length > 0 && (
                       <button
+                        type="button"
                         onClick={toggleSelectAll}
                         className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-accent rounded-md transition-colors"
                       >
@@ -1794,12 +1971,18 @@ export function CreateSkillModal({ isOpen, onClose }: CreateSkillModalProps) {
                           selectedScanItems.has(skill.filePath),
                         ) ? (
                           <>
-                            <CheckSquareIcon className="w-3.5 h-3.5" />{" "}
+                            <CheckSquareIcon
+                              className="w-3.5 h-3.5"
+                              aria-hidden="true"
+                            />{" "}
                             {t("skill.deselectAll", "Deselect All")}
                           </>
                         ) : (
                           <>
-                            <SquareIcon className="w-3.5 h-3.5" />{" "}
+                            <SquareIcon
+                              className="w-3.5 h-3.5"
+                              aria-hidden="true"
+                            />{" "}
                             {t("skill.selectAll", "Select All")}
                           </>
                         )}
@@ -1825,6 +2008,7 @@ export function CreateSkillModal({ isOpen, onClose }: CreateSkillModalProps) {
                         })();
                         return (
                           <button
+                            type="button"
                             key={skill.filePath}
                             onClick={() =>
                               !skill.isImported &&
@@ -1847,7 +2031,10 @@ export function CreateSkillModal({ isOpen, onClose }: CreateSkillModalProps) {
                                     : "bg-primary/10 text-primary"
                                 }`}
                               >
-                                <FileTextIcon className="w-5 h-5" />
+                                <FileTextIcon
+                                  aria-hidden="true"
+                                  className="w-5 h-5"
+                                />
                               </div>
 
                               <div className="min-w-0 flex-1">
@@ -1875,9 +2062,15 @@ export function CreateSkillModal({ isOpen, onClose }: CreateSkillModalProps) {
 
                                   <div className="shrink-0 pt-0.5">
                                     {skill.isImported || isSelected ? (
-                                      <CheckSquareIcon className="w-4 h-4 text-primary" />
+                                      <CheckSquareIcon
+                                        aria-hidden="true"
+                                        className="w-4 h-4 text-primary"
+                                      />
                                     ) : (
-                                      <SquareIcon className="w-4 h-4 text-muted-foreground" />
+                                      <SquareIcon
+                                        aria-hidden="true"
+                                        className="w-4 h-4 text-muted-foreground"
+                                      />
                                     )}
                                   </div>
                                 </div>
@@ -1917,7 +2110,10 @@ export function CreateSkillModal({ isOpen, onClose }: CreateSkillModalProps) {
                                             key={tag}
                                             className="inline-flex items-center gap-1 rounded-full bg-primary px-2.5 py-1 text-[11px] font-medium text-white"
                                           >
-                                            <HashIcon className="w-3 h-3" />
+                                            <HashIcon
+                                              aria-hidden="true"
+                                              className="w-3 h-3"
+                                            />
                                             {tag}
                                             <button
                                               type="button"
@@ -1930,7 +2126,10 @@ export function CreateSkillModal({ isOpen, onClose }: CreateSkillModalProps) {
                                               }}
                                               className="hover:text-white/70"
                                             >
-                                              <XIcon className="w-3 h-3" />
+                                              <XIcon
+                                                aria-hidden="true"
+                                                className="w-3 h-3"
+                                              />
                                             </button>
                                           </span>
                                         ))}
@@ -1987,7 +2186,10 @@ export function CreateSkillModal({ isOpen, onClose }: CreateSkillModalProps) {
                                   className="mt-4 flex items-center gap-1 text-[11px] text-muted-foreground/60 font-mono truncate"
                                   title={skill.localPath}
                                 >
-                                  <FolderOpenIcon className="w-3 h-3 shrink-0" />
+                                  <FolderOpenIcon
+                                    className="w-3 h-3 shrink-0"
+                                    aria-hidden="true"
+                                  />
                                   <span className="truncate">{shortPath}</span>
                                 </div>
                               </div>
@@ -2001,14 +2203,18 @@ export function CreateSkillModal({ isOpen, onClose }: CreateSkillModalProps) {
                   {/* Rescan button */}
                   <div className="flex justify-center">
                     <button
-                      onClick={handleScanLocal}
+                      type="button"
+                      onClick={() => void handleScanLocal(scanRootPaths)}
                       disabled={isScanning}
                       className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-accent rounded-md transition-colors"
                     >
                       {isScanning ? (
-                        <LoaderIcon className="w-3 h-3 animate-spin" />
+                        <LoaderIcon
+                          className="w-3 h-3 animate-spin"
+                          aria-hidden="true"
+                        />
                       ) : (
-                        <SearchIcon className="w-3 h-3" />
+                        <SearchIcon className="w-3 h-3" aria-hidden="true" />
                       )}
                       {t("skill.rescan", "Rescan")}
                     </button>
@@ -2027,14 +2233,21 @@ export function CreateSkillModal({ isOpen, onClose }: CreateSkillModalProps) {
                     )}
                   </p>
                   <button
-                    onClick={handleScanLocal}
+                    type="button"
+                    onClick={() => void handleScanLocal(scanRootPaths)}
                     disabled={isScanning}
                     className="inline-flex items-center gap-2 px-3 py-2 text-sm font-medium text-muted-foreground hover:text-foreground hover:bg-accent rounded-lg transition-colors"
                   >
                     {isScanning ? (
-                      <LoaderIcon className="w-3.5 h-3.5 animate-spin" />
+                      <LoaderIcon
+                        className="w-3.5 h-3.5 animate-spin"
+                        aria-hidden="true"
+                      />
                     ) : (
-                      <SearchIcon className="w-3.5 h-3.5" />
+                      <SearchIcon
+                        className="w-3.5 h-3.5"
+                        aria-hidden="true"
+                      />
                     )}
                     {t("skill.rescan", "Rescan")}
                   </button>
@@ -2051,32 +2264,33 @@ export function CreateSkillModal({ isOpen, onClose }: CreateSkillModalProps) {
             className="flex items-center justify-end gap-3 border-t border-border app-wallpaper-surface px-6 py-4 shrink-0"
           >
             <button
-              onClick={() => setMode("select")}
+              type="button"
+              onClick={() => {
+                resetGitHubImportState();
+                setMode("select");
+              }}
               className="px-4 py-2.5 text-sm font-medium text-muted-foreground hover:text-foreground hover:bg-accent rounded-lg transition-colors"
             >
               {t("common.back", "Back")}
             </button>
-            <button
-              onClick={
-                githubScanDone
-                  ? handleImportSelectedGitHubSkills
-                  : handleGitHubInstall
-              }
-              disabled={
-                isLoading ||
-                (githubScanDone && selectedGitHubSkills.size === 0)
-              }
-              className="flex min-w-[12rem] items-center justify-center gap-2 px-4 py-2.5 bg-primary text-primary-foreground text-sm font-medium rounded-lg hover:bg-primary/90 disabled:opacity-50 transition-colors"
-            >
-              {isLoading ? (
-                <LoaderIcon className="w-4 h-4 animate-spin" />
-              ) : (
-                <CheckIcon className="w-4 h-4" />
-              )}
-              {githubScanDone
-                ? t("skill.importSelected", "Import Selected")
-                : t("skill.scanRepository", "Scan Repository")}
-            </button>
+            {githubScanDone && (
+              <button
+                type="button"
+                onClick={handleImportSelectedGitHubSkills}
+                disabled={isLoading || selectedGitHubSkills.size === 0}
+                className="flex min-w-[12rem] items-center justify-center gap-2 px-4 py-2.5 bg-primary text-primary-foreground text-sm font-medium rounded-lg hover:bg-primary/90 disabled:opacity-50 transition-colors"
+              >
+                {isLoading ? (
+                  <LoaderIcon
+                    className="w-4 h-4 animate-spin"
+                    aria-hidden="true"
+                  />
+                ) : (
+                  <CheckIcon className="w-4 h-4" aria-hidden="true" />
+                )}
+                {t("skill.importSelected", "Import Selected")}
+              </button>
+            )}
           </div>
         )}
 
@@ -2092,19 +2306,23 @@ export function CreateSkillModal({ isOpen, onClose }: CreateSkillModalProps) {
               {t("skill.selected", "selected")}
             </span>
             <button
+              type="button"
               onClick={handleImportSelected}
               disabled={isLoading || selectedScanItems.size === 0}
               className="flex items-center gap-2 px-5 py-2.5 bg-primary text-primary-foreground text-sm font-medium rounded-lg hover:bg-primary/90 disabled:opacity-50 transition-colors"
             >
               {isLoading ? (
                 <>
-                  <LoaderIcon className="w-4 h-4 animate-spin" />
+                  <LoaderIcon
+                    className="w-4 h-4 animate-spin"
+                    aria-hidden="true"
+                  />
                   {t("skill.importing", "Importing...")} ({importingCount}/
                   {selectedScanItems.size})
                 </>
               ) : (
                 <>
-                  <CheckIcon className="w-4 h-4" />
+                  <CheckIcon className="w-4 h-4" aria-hidden="true" />
                   {t("skill.importSelected", "Import Selected")} (
                   {selectedScanItems.size})
                 </>
@@ -2117,20 +2335,25 @@ export function CreateSkillModal({ isOpen, onClose }: CreateSkillModalProps) {
         {isManualMode && (
           <div className="flex items-center justify-end gap-3 px-6 py-4 border-t border-border shrink-0 app-wallpaper-surface">
             <button
+              type="button"
               onClick={() => setMode("select")}
               className="px-4 py-2.5 text-sm font-medium text-muted-foreground hover:text-foreground hover:bg-accent rounded-lg transition-colors"
             >
               {t("common.back", "Back")}
             </button>
             <button
+              type="button"
               onClick={handleManualCreate}
               disabled={isLoading || isGenerating || !name.trim()}
               className="flex items-center gap-2 px-4 py-2.5 bg-primary text-primary-foreground text-sm font-medium rounded-lg hover:bg-primary/90 disabled:opacity-50 transition-colors"
             >
               {isLoading ? (
-                <LoaderIcon className="w-4 h-4 animate-spin" />
+                <LoaderIcon
+                  className="w-4 h-4 animate-spin"
+                  aria-hidden="true"
+                />
               ) : (
-                <CheckIcon className="w-4 h-4" />
+                <CheckIcon className="w-4 h-4" aria-hidden="true" />
               )}
               {t("skill.create", "Create")}
             </button>

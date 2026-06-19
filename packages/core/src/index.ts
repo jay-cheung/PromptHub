@@ -6,4 +6,7 @@ export * from "./skills/install-flow";
 export * from "./platform-paths";
 export * from "./rules-workspace";
 export * from "./ai-client";
+export * from "./ai-config";
 export * from "./rules-rewrite";
+export * from "./mcp-library";
+export * from "./plugin-library";

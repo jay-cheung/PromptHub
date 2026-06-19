@@ -7,6 +7,9 @@
 - 新增项目创建后的自动选择与自动扫描流程，创建成功后立即触发 `scanProjectSkills(...)`，减少手动刷新步骤。
 - 为项目列表卡片和项目详情头部增加首字母 avatar，在没有真实图标资源时仍能提供稳定识别。
 - 更新 `apps/desktop/src/renderer/stores/settings.store.ts`，归一化 `skillProjects.scanPaths`，避免把 `rootPath` 重复保存到额外扫描路径中。
+- `settings.store` 现在在 zustand `merge` 与 `migrate` 中复用同一套
+  `skillProjects` 规范化逻辑；current-version localStorage 中的畸形项目记录会被过滤，
+  项目名、根目录、额外扫描路径与部署目标会在 hydrate 时先 trim、去重并剔除 root 等价路径。
 - 更新 `apps/desktop/tests/unit/components/skill-projects-view.test.tsx` 与 `apps/desktop/tests/unit/stores/skill.store.test.ts`，覆盖自动填名、自动扫描与 scan path 归一化行为。
 - 同步补齐桌面端 7 个 locale 中与项目流程相关的新文案，避免仅 `en` / `zh` 生效。
 - 调整项目级 Skill 详情页：预览态右栏不再复用 `SkillCodePane` 显示 `SKILL.md` 原文，而是改为项目专用操作区；未收录时突出“导入到我的 Skills”，已收录时直接切回正常平台分发面板。
@@ -42,6 +45,47 @@
 - 清理 `SkillPlatformPanel.tsx` 中未使用的 `projectsWithTargets.targets` 结构，项目列表直接基于 `normalizedProjects` 渲染，避免后续维护误读目标目录来源。
 - 调整 `SkillStore.tsx` 的 `official` 源语义：不再把本地 `registrySkills`/curated 数据伪装成“官方商店”内容展示。当前官方商店改为纯占位态，标题与正文统一提示“后端真实数据源接入后开放，敬请期待”，避免用户误以为这些卡片来自真实官方后端。
 - 更新 `tests/unit/components/skill-i18n-smoke.test.tsx`，改为验证全局 Skill 详情页在同时存在平台安装与项目分发时，会出现 `项目分发` 切换并仍可触发原有分发入口。
+- 优化项目 Skill 结果区视觉层级：
+  - 结果区从 2/3 列大卡片改为紧凑单列列表，减少右侧大面积空白和不同卡片高度错位。
+  - 项目页头部高度从 `152px` 收窄到 `132px`，项目头像和添加按钮同步缩小一档。
+  - “打开文件夹 / 在我的 Skill 中打开 / 删除”等次要操作改为 icon-only，并通过 `aria-label` / `title` 保留可访问名称；“导入到我的 Skill / 分发”仍保留文字作为主动作。
+  - 新增组件回归断言，锁定项目 Skill 列表使用紧凑列表布局，并确认 `Open Folder` 不再作为可见按钮文字出现。
+- 修复 Cherry Studio 平台配置：
+  - macOS 默认根目录从开发版 `~/Library/Application Support/CherryStudioDev` 改为正式版 `~/Library/Application Support/CherryStudio`
+  - 保持 `Data/Skills` 作为 skills 相对目录，已在本机验证 `/Users/lingxiaotian/Library/Application Support/CherryStudio/Data/Skills` 存在
+  - 从已安装的 `/Applications/Cherry Studio.app/Contents/Resources/icon.icns` 提取真实平台图标并接入 `PlatformIcon`，不再回退为通用 Bot 图标
+- 修复 Cherry Studio 当前版本安装适配：
+  - 当前版本 Cherry Studio 的数据库位于 `Data/agents.db`，且表名为 `skills`、`agent_skills`、`agents`
+  - 适配层现在优先打开 `Data/agents.db` 并检测新表结构；如果不存在，则回退旧版 `cherrystudio.sqlite` 与 `agent_global_skill` / `agent_skill` / `agent` 表
+  - 安装、卸载、安装状态检测和已启用 Agent 软链接清理都通过同一 schema 检测结果选择表名
+- 修复从 Agent/平台目录导入到我的 Skill 后的全局分发状态：
+  - `getSkillMdInstallStatusForSkill(...)` 与 `getSkillMdInstallStatusDetailsForSkill(...)` 仍优先使用 PromptHub 主动分发时写入的 activation 记录保护同名变体
+  - 当 activation 记录不存在时，如果 `source_url` 或 `local_repo_path` 指向某个平台 skills 目录下的直接 skill 文件夹，则把该平台的真实目录/DB 状态作为已安装证据
+  - 这让从 Cherry Studio Agent Skills 导入的 `skill-creator` 在我的 Skill 详情页中也能显示 Cherry Studio 已安装，而不是误显示未安装
+- 优化全局平台安装成功 toast：单平台成功时显示“Skill 名 + 平台名”，多平台成功时显示成功平台列表，不再只显示 `1/1` 这类缺少上下文的计数。
+- 完善我的 Skill 来源标签：
+  - 新增 Agent 平台来源识别 helper，优先从 `source_label` 匹配平台名，也能从已有 `source_url` / `local_repo_path` 中的内置平台 skills 目录回推来源
+  - 从 Agent Skill 页导入到我的 Skill 时写入平台名作为 `source_label`，后续卡片、列表和详情来源不再只能落为“本地导入”
+  - Agent 平台来源优先于项目目录判断，但只匹配全局平台根目录；例如 `/Users/name/.claude/skills/x` 显示 `Claude Code Import`，而 `/Users/name/project/.claude/skills/x` 仍显示“项目导入”
+  - 普通扫描路径或拖入目录仍显示“本地导入”
+  - 对 Cherry Studio 这类路径，卡片来源显示为 `Cherry Studio Import`，详情来源显示为 `Imported from Cherry Studio Agent Skills`
+- 修复 Cherry Studio 平台扫描页卸载：
+  - 新增 Cherry Studio 专用的 `uninstallCherryStudioPlatformSkill(...)`，负责校验平台 Skill 路径、映射 folder name，并转入 DB-aware 卸载
+  - `SkillInstaller.uninstallPlatformSkill(...)` 对 Cherry Studio 只做入口分发，不再把 Cherry 的数据库语义散落在通用平台卸载逻辑中
+  - Cherry Studio 适配器会同步删除 `Data/agents.db` 中的 `skills` 与 `agent_skills` 记录，并继续清理 copied skill 文件夹和已启用 Agent 的软链接
+  - 如果 Cherry Studio 数据库中的 skill 行带有 `builtin` 或 `is_builtin` 标记，则拒绝卸载，避免误删内置 Skill
+  - Cherry Studio 不再强制把 symlink 请求降级成 copy：软连接分发现在会写入 Cherry 自身数据库注册记录，并把 `Data/Skills/<folder>` 建成指向 PromptHub 源目录的目录 symlink；普通安装仍保持 copy
+  - Cherry Studio 安装状态详情会检查全局 Skill 文件夹本身是否为 symlink，避免 UI 把软连接安装误报为 copy
+  - 软连接分发 CRUD 已补齐：创建会写 DB 并创建目录 symlink；读取会返回 installed + mode；重复安装会复用原 DB row 并更新 hash/目标；copy 与 symlink 可以互相切换；卸载会删除 DB row 和 Cherry 侧链接/目录，不删除 PromptHub 源目录；symlink 权限失败时回退为 DB-backed copy 安装
+- 修复商店详情“从我的 Skill 中移除”按钮无效的问题：
+  - `uninstallRegistrySkill(...)` 不再只按 `source_id` 精确查找本地 skill，而是先用 `source_id` / `slug` / `source_url` / `content_url` 找到对应 store 条目，再复用 `findInstalledRegistrySkill(...)` 的已导入口径匹配本地 skill
+  - `installFromRegistry(...)` 与 `updateRegistrySkill(...)` 也复用同一 key resolver，避免同类无 `source_id` store 条目在导入、更新、移除三个动作上口径不一致
+  - 新增组件回归测试，直接点击 `Remove from My Skills`，覆盖“详情显示已导入，但本地 skill 只按 `registry_slug` 关联”的场景
+- 修复项目 Skill 工作区只能添加项目、无法删除项目的问题：
+  - 项目详情头部在编辑按钮旁新增删除项目按钮，使用破坏性二次确认
+  - 确认文案明确只会移除 PromptHub 项目工作区记录，不会删除用户磁盘上的项目目录或文件
+  - 删除当前项目后自动选择下一个项目；没有剩余项目时回到空状态
+  - 新增组件回归测试，覆盖确认删除、调用 `removeSkillProject(projectId)`、切换到下一个项目和成功 toast
 
 ## Verification
 
@@ -78,6 +122,73 @@
 - `pnpm --filter @prompthub/desktop typecheck`
   - 结果：通过
 - `pnpm --filter @prompthub/desktop exec eslint src/renderer/components/skill/SkillPlatformPanel.tsx src/renderer/components/skill/SkillFullDetailPage.tsx tests/unit/components/skill-detail-project-distribution.test.tsx tests/unit/components/skill-i18n-smoke.test.tsx`
+  - 结果：通过
+- 项目 Skill 紧凑列表视觉调整后重新运行：
+- `pnpm --filter @prompthub/desktop exec vitest run tests/unit/components/skill-projects-view.test.tsx`
+  - 结果：通过（16/16）
+- `pnpm --filter @prompthub/desktop exec eslint src/renderer/components/skill/SkillProjectsView.tsx tests/unit/components/skill-projects-view.test.tsx`
+  - 结果：通过
+- `pnpm --filter @prompthub/desktop typecheck`
+  - 结果：通过
+- Cherry Studio 路径与图标修复后重新运行：
+- `pnpm --filter @prompthub/desktop exec vitest run tests/unit/main/cherry-studio-skill-platform.test.ts tests/unit/main/skill-installer-utils.test.ts tests/unit/components/platform-icon.test.tsx`
+  - 结果：通过（66/66）
+- `pnpm --filter @prompthub/desktop typecheck`
+  - 结果：通过
+- `git diff --check`
+  - 结果：通过
+- Agent 导入状态与安装成功 toast 修复后重新运行：
+- `pnpm --filter @prompthub/desktop exec vitest run tests/unit/main/skill-installer-platform.test.ts`
+  - 结果：通过（16/16）
+- `pnpm --filter @prompthub/desktop exec vitest run tests/unit/components/skill-detail-project-distribution.test.tsx`
+  - 结果：通过（16/16）
+- 来源标签完善后重新运行：
+- `pnpm --filter @prompthub/desktop exec vitest run tests/unit/components/skill-view-tags.test.tsx tests/unit/components/skill-detail-utils.test.ts`
+  - 结果：通过（24/24；覆盖全局 Claude Code Agent 目录不再误判为项目导入，保留既有 SkillListView act warning）
+- `pnpm --filter @prompthub/desktop typecheck`
+  - 结果：通过
+- `git diff --check`
+  - 结果：通过
+- Cherry Studio 平台扫描页卸载与内置 Skill 保护修复后重新运行：
+- `pnpm --filter @prompthub/desktop exec vitest run tests/unit/main/cherry-studio-skill-platform.test.ts tests/unit/main/skill-installer.test.ts`
+  - 结果：通过（164/164）
+- `pnpm --filter @prompthub/desktop typecheck`
+  - 结果：通过
+- `git diff --check`
+  - 结果：通过
+- Cherry Studio DB-backed symlink 分发修复后重新运行：
+- `pnpm --filter @prompthub/desktop exec vitest run tests/unit/main/cherry-studio-skill-platform.test.ts tests/unit/main/skill-installer-platform.test.ts`
+  - 结果：通过（30/30）
+- `pnpm --filter @prompthub/desktop exec vitest run tests/unit/main/cherry-studio-skill-platform.test.ts tests/unit/main/skill-installer-platform.test.ts tests/unit/main/skill-installer.test.ts`
+  - 结果：通过（188/188）
+- `pnpm --filter @prompthub/desktop typecheck`
+  - 结果：通过
+- `git diff --check`
+  - 结果：通过
+- 商店详情移除按钮修复后重新运行：
+- `pnpm --filter @prompthub/desktop test -- tests/unit/stores/skill.store.test.ts tests/unit/components/skill-store-remote.test.tsx --run`
+  - 结果：通过（68/68）
+- `pnpm --filter @prompthub/desktop typecheck`
+  - 结果：通过
+- `git diff --check`
+  - 结果：通过
+- 项目 Skill 删除项目入口修复后重新运行：
+- `pnpm --filter @prompthub/desktop exec vitest run tests/unit/components/skill-projects-view.test.tsx`
+  - 结果：通过（18/18）
+- `pnpm --filter @prompthub/desktop typecheck`
+  - 结果：通过
+- `git diff --check`
+  - 结果：通过
+- 同版本 `skillProjects` hydrate 规范化补充验证：
+- `pnpm --filter @prompthub/desktop test -- --run tests/unit/stores/settings-agent-roots.test.ts -t "same-version persisted skill projects"`
+  - 结果：先复现 current-version hydrate 缺口，修复后通过
+- `pnpm --filter @prompthub/desktop test -- --run tests/unit/stores/settings-agent-roots.test.ts`
+  - 结果：通过（7/7）
+- `pnpm --filter @prompthub/desktop typecheck`
+  - 结果：通过
+- `pnpm --filter @prompthub/desktop lint`
+  - 结果：通过
+- `git diff --check -- apps/desktop/src/renderer/stores/settings.store.ts apps/desktop/tests/unit/stores/settings-agent-roots.test.ts spec/changes/active/desktop-skill-project-flow spec/issues/active/quality.md`
   - 结果：通过
 
 ## Notes

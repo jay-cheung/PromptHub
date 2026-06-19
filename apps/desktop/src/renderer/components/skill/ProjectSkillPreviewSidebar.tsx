@@ -1,10 +1,11 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   CheckIcon,
   DownloadIcon,
   FolderOpenIcon,
   Loader2Icon,
   PlusIcon,
+  SendIcon,
   TrashIcon,
 } from "lucide-react";
 import type { TFunction } from "i18next";
@@ -23,6 +24,7 @@ interface ProjectSkillPreviewSidebarProps {
   onRemoveFromProject?: () => void | Promise<void>;
   selectedSkill: Skill;
   sourcePath: string;
+  symlinkTargetPath?: string;
   t: TFunction;
 }
 
@@ -39,23 +41,60 @@ export function ProjectSkillPreviewSidebar({
   onRemoveFromProject,
   selectedSkill,
   sourcePath,
+  symlinkTargetPath,
   t,
 }: ProjectSkillPreviewSidebarProps) {
   const [selectedTargets, setSelectedTargets] = useState<Set<string>>(
     () => new Set(deployTargets),
   );
+  const showSymlinkTarget = Boolean(symlinkTargetPath);
+  const sourceTitle = showSymlinkTarget
+    ? t("skill.openAgentShortcut", "Open agent shortcut")
+    : t("skill.openLocalSource", "Open Local Skill Folder");
 
   const sortedTargets = useMemo(
-    () => Array.from(new Set(deployTargets.filter((entry) => entry.trim().length > 0))),
+    () =>
+      Array.from(
+        new Set(deployTargets.filter((entry) => entry.trim().length > 0)),
+      ),
     [deployTargets],
   );
+  const previousDeployTargetsRef = useRef<Set<string>>(new Set(sortedTargets));
+
+  useEffect(() => {
+    const previousTargets = previousDeployTargetsRef.current;
+    const currentTargets = new Set(sortedTargets);
+
+    setSelectedTargets((previousSelectedTargets) => {
+      let didChange = false;
+      const nextSelectedTargets = new Set<string>();
+
+      for (const target of previousSelectedTargets) {
+        if (currentTargets.has(target)) {
+          nextSelectedTargets.add(target);
+        } else {
+          didChange = true;
+        }
+      }
+
+      for (const target of sortedTargets) {
+        if (!previousTargets.has(target)) {
+          nextSelectedTargets.add(target);
+          didChange = true;
+        }
+      }
+
+      return didChange ? nextSelectedTargets : previousSelectedTargets;
+    });
+
+    previousDeployTargetsRef.current = currentTargets;
+  }, [sortedTargets]);
 
   const effectiveSelectedTargets = useMemo(() => {
-    if (selectedTargets.size === 0) {
-      return new Set(sortedTargets);
-    }
     return new Set(
-      Array.from(selectedTargets).filter((entry) => sortedTargets.includes(entry)),
+      Array.from(selectedTargets).filter((entry) =>
+        sortedTargets.includes(entry),
+      ),
     );
   }, [selectedTargets, sortedTargets]);
 
@@ -99,9 +138,12 @@ export function ProjectSkillPreviewSidebar({
                 className="inline-flex w-full items-center justify-center gap-2 rounded-xl border border-destructive/20 bg-destructive/5 px-4 py-3 text-sm font-medium text-destructive transition-colors hover:bg-destructive/10 disabled:opacity-60"
               >
                 {isRemoving ? (
-                  <Loader2Icon className="h-4 w-4 animate-spin" />
+                  <Loader2Icon
+                    aria-hidden="true"
+                    className="h-4 w-4 animate-spin"
+                  />
                 ) : (
-                  <TrashIcon className="h-4 w-4" />
+                  <TrashIcon aria-hidden="true" className="h-4 w-4" />
                 )}
                 {t("skill.removeFromProject", "Remove from Project")}
               </button>
@@ -115,9 +157,12 @@ export function ProjectSkillPreviewSidebar({
                 className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-primary px-4 py-3 text-sm font-medium text-white transition-colors hover:bg-primary/90 disabled:opacity-60"
               >
                 {isImporting ? (
-                  <Loader2Icon className="h-4 w-4 animate-spin" />
+                  <Loader2Icon
+                    aria-hidden="true"
+                    className="h-4 w-4 animate-spin"
+                  />
                 ) : (
-                  <DownloadIcon className="h-4 w-4" />
+                  <DownloadIcon aria-hidden="true" className="h-4 w-4" />
                 )}
                 {t("skill.addToLibrary", "Import to My Skills")}
               </button>
@@ -150,7 +195,7 @@ export function ProjectSkillPreviewSidebar({
               onClick={() => void onAddDeployTarget()}
               className="inline-flex items-center gap-2 rounded-xl border border-border app-wallpaper-surface px-3 py-2 text-xs font-medium text-foreground transition-colors hover:bg-accent"
             >
-              <PlusIcon className="h-3.5 w-3.5" />
+              <PlusIcon aria-hidden="true" className="h-3.5 w-3.5" />
               {t("skill.addDeployTarget", "Add Folder")}
             </button>
           </div>
@@ -162,6 +207,7 @@ export function ProjectSkillPreviewSidebar({
                 <button
                   key={target}
                   type="button"
+                  aria-pressed={isSelected}
                   onClick={() => toggleTarget(target)}
                   className={`flex w-full items-center justify-between gap-3 rounded-2xl border px-4 py-3 text-left transition-colors ${
                     isSelected
@@ -171,8 +217,12 @@ export function ProjectSkillPreviewSidebar({
                 >
                   <div className="min-w-0 flex-1">
                     <div className="text-sm font-medium text-foreground">
-                      {target.endsWith("/.agents/skills") || target.endsWith("\\.agents\\skills")
-                        ? t("skill.defaultProjectDeployTarget", "Default .agents target")
+                      {target.endsWith("/.agents/skills") ||
+                      target.endsWith("\\.agents\\skills")
+                        ? t(
+                            "skill.defaultProjectDeployTarget",
+                            "Default .agents target",
+                          )
                         : t("skill.customProjectDeployTarget", "Custom target")}
                     </div>
                     <div className="mt-1 break-all font-mono text-[11px] leading-relaxed text-muted-foreground">
@@ -186,7 +236,9 @@ export function ProjectSkillPreviewSidebar({
                         : "border-muted-foreground/30"
                     }`}
                   >
-                    {isSelected ? <CheckIcon className="h-3 w-3" /> : null}
+                    {isSelected ? (
+                      <CheckIcon aria-hidden="true" className="h-3 w-3" />
+                    ) : null}
                   </div>
                 </button>
               );
@@ -200,9 +252,12 @@ export function ProjectSkillPreviewSidebar({
             className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-primary px-4 py-3 text-sm font-medium text-white transition-colors hover:bg-primary/90 disabled:opacity-60"
           >
             {isDeploying ? (
-              <Loader2Icon className="h-4 w-4 animate-spin" />
+              <Loader2Icon
+                aria-hidden="true"
+                className="h-4 w-4 animate-spin"
+              />
             ) : (
-              <DownloadIcon className="h-4 w-4" />
+              <SendIcon aria-hidden="true" className="h-4 w-4" />
             )}
             {t("skill.deployToProjectFolders", {
               name: selectedSkill.name,
@@ -216,23 +271,49 @@ export function ProjectSkillPreviewSidebar({
         <h3 className="text-xs font-bold text-muted-foreground uppercase tracking-[0.2em]">
           {t("skill.source", "Source")}
         </h3>
-        <div className="app-wallpaper-panel rounded-2xl border border-border p-5">
+        <div className="app-wallpaper-panel rounded-2xl border border-border p-5 space-y-3">
           <button
             type="button"
             onClick={() => void window.electron?.openPath?.(sourcePath)}
             className="flex w-full items-center gap-3 rounded-2xl border border-border bg-accent/60 px-4 py-4 text-left transition-colors hover:bg-accent"
             title={sourcePath}
           >
-            <FolderOpenIcon className="h-5 w-5 shrink-0 text-primary" />
+            <FolderOpenIcon
+              aria-hidden="true"
+              className="h-5 w-5 shrink-0 text-primary"
+            />
             <div className="min-w-0">
               <div className="text-sm font-semibold text-foreground">
-                {t("skill.openLocalSource", "Open Local Skill Folder")}
+                {sourceTitle}
               </div>
               <div className="mt-1 break-words text-xs leading-relaxed text-muted-foreground">
                 {sourcePath}
               </div>
             </div>
           </button>
+          {showSymlinkTarget ? (
+            <button
+              type="button"
+              onClick={() =>
+                void window.electron?.openPath?.(symlinkTargetPath ?? "")
+              }
+              className="flex w-full items-center gap-3 rounded-2xl border border-border bg-accent/60 px-4 py-4 text-left transition-colors hover:bg-accent"
+              title={symlinkTargetPath}
+            >
+              <FolderOpenIcon
+                aria-hidden="true"
+                className="h-5 w-5 shrink-0 text-primary"
+              />
+              <div className="min-w-0">
+                <div className="text-sm font-semibold text-foreground">
+                  {t("skill.openSourceSkillFolder", "Open source Skill folder")}
+                </div>
+                <div className="mt-1 break-words text-xs leading-relaxed text-muted-foreground">
+                  {symlinkTargetPath}
+                </div>
+              </div>
+            </button>
+          ) : null}
         </div>
       </section>
     </div>

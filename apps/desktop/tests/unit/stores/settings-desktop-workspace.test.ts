@@ -26,7 +26,8 @@ describe("settings desktop workspace actions", () => {
 
     useSettingsStore.getState().toggleDesktopHomeModule("prompt");
     useSettingsStore.getState().toggleDesktopHomeModule("skill");
-    useSettingsStore.getState().toggleDesktopHomeModule("rules");
+    useSettingsStore.getState().toggleDesktopHomeModule("mcp");
+    useSettingsStore.getState().toggleDesktopHomeModule("plugin");
 
     expect(useSettingsStore.getState().desktopHomeModules).toEqual(["rules"]);
 
@@ -80,6 +81,110 @@ describe("settings desktop workspace actions", () => {
       "skill",
       "prompt",
     ]);
+  });
+
+  it("adds MCP and Plugin to old persisted default desktop modules during hydration", async () => {
+    localStorage.setItem(
+      "prompthub-settings",
+      JSON.stringify({
+        state: {
+          desktopHomeModules: ["skill", "prompt", "rules"],
+        },
+        version: 16,
+      }),
+    );
+
+    const { useSettingsStore } = await import(
+      "../../../src/renderer/stores/settings.store"
+    );
+
+    expect(useSettingsStore.getState().desktopHomeModules).toEqual([
+      "skill",
+      "mcp",
+      "plugin",
+      "prompt",
+      "rules",
+    ]);
+  });
+
+  it("lets users hide MCP after it has been introduced", async () => {
+    const { useSettingsStore } = await import(
+      "../../../src/renderer/stores/settings.store"
+    );
+
+    useSettingsStore.setState({
+      desktopHomeModules: ["prompt", "skill", "mcp", "plugin", "rules"],
+    });
+    useSettingsStore.getState().toggleDesktopHomeModule("mcp");
+
+    expect(useSettingsStore.getState().desktopHomeModules).toEqual([
+      "prompt",
+      "skill",
+      "plugin",
+      "rules",
+    ]);
+  });
+
+  it("does not add MCP to custom legacy module subsets", async () => {
+    localStorage.setItem(
+      "prompthub-settings",
+      JSON.stringify({
+        state: {
+          desktopHomeModules: ["skill", "prompt"],
+        },
+        version: 16,
+      }),
+    );
+
+    const { useSettingsStore } = await import(
+      "../../../src/renderer/stores/settings.store"
+    );
+
+    expect(useSettingsStore.getState().desktopHomeModules).toEqual([
+      "skill",
+      "prompt",
+    ]);
+  });
+
+  it("normalizes same-version persisted desktop module settings during hydration", async () => {
+    localStorage.setItem(
+      "prompthub-settings",
+      JSON.stringify({
+        state: {
+          desktopHomeModules: ["skill", "ghost", "skill", "prompt"],
+        },
+        version: 16,
+      }),
+    );
+
+    const { useSettingsStore } = await import(
+      "../../../src/renderer/stores/settings.store"
+    );
+
+    expect(useSettingsStore.getState().desktopHomeModules).toEqual([
+      "skill",
+      "prompt",
+    ]);
+  });
+
+  it("normalizes same-version persisted sidebar tag section heights during hydration", async () => {
+    localStorage.setItem(
+      "prompthub-settings",
+      JSON.stringify({
+        state: {
+          tagsSectionHeight: -1,
+          skillTagsSectionHeight: "invalid",
+        },
+        version: 16,
+      }),
+    );
+
+    const { useSettingsStore } = await import(
+      "../../../src/renderer/stores/settings.store"
+    );
+
+    expect(useSettingsStore.getState().tagsSectionHeight).toBe(140);
+    expect(useSettingsStore.getState().skillTagsSectionHeight).toBe(140);
   });
 
   it("persists and normalizes the skill list page size preference", async () => {

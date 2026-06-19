@@ -5,6 +5,7 @@ import {
   downloadCompressedBackup,
   downloadSelectiveExport,
   exportDatabase,
+  formatBackupImportError,
   restoreFromBackup,
   restoreFromFile,
 } from "../../../src/renderer/services/database-backup";
@@ -148,6 +149,66 @@ describe("database-backup restore", () => {
       value: originalRevokeObjectURL,
     });
     vi.useRealTimers();
+  });
+
+  it("cleans up backup download URLs when the browser click fails", async () => {
+    const originalCreateElement = document.createElement.bind(document);
+    const originalCreateObjectURL = URL.createObjectURL;
+    const originalRevokeObjectURL = URL.revokeObjectURL;
+
+    Object.defineProperty(URL, "createObjectURL", {
+      configurable: true,
+      writable: true,
+      value: vi.fn(),
+    });
+    Object.defineProperty(URL, "revokeObjectURL", {
+      configurable: true,
+      writable: true,
+      value: vi.fn(),
+    });
+
+    const createObjectURL = vi
+      .spyOn(URL, "createObjectURL")
+      .mockReturnValue("blob:failed-download");
+    const revokeObjectURL = vi
+      .spyOn(URL, "revokeObjectURL")
+      .mockImplementation(() => {});
+
+    const anchor = originalCreateElement("a");
+    const clickError = new Error("download blocked");
+    const clickSpy = vi.spyOn(anchor, "click").mockImplementation(() => {
+      throw clickError;
+    });
+    const removeChild = vi.spyOn(document.body, "removeChild");
+    vi.spyOn(document, "createElement").mockImplementation((tagName: string) => {
+      if (tagName === "a") {
+        return anchor;
+      }
+      return originalCreateElement(tagName);
+    });
+
+    await expect(downloadBackup()).rejects.toThrow("download blocked");
+
+    expect(createObjectURL).toHaveBeenCalledTimes(1);
+    expect(clickSpy).toHaveBeenCalledTimes(1);
+    expect(removeChild).toHaveBeenCalledWith(anchor);
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:failed-download");
+
+    removeChild.mockRestore();
+    createObjectURL.mockRestore();
+    revokeObjectURL.mockRestore();
+    clickSpy.mockRestore();
+    vi.restoreAllMocks();
+    Object.defineProperty(URL, "createObjectURL", {
+      configurable: true,
+      writable: true,
+      value: originalCreateObjectURL,
+    });
+    Object.defineProperty(URL, "revokeObjectURL", {
+      configurable: true,
+      writable: true,
+      value: originalRevokeObjectURL,
+    });
   });
 
   it("still exports legacy compressed backups as .phub.gz for backward compatibility", async () => {
@@ -985,6 +1046,15 @@ describe("database-backup restore", () => {
 
     expect(clearDatabaseMock).not.toHaveBeenCalled();
     expect(window.api.skill.deleteAll).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "JSON Parse error: Unterminated string",
+    "Unexpected end of JSON input",
+  ])("formats truncated JSON import errors for users: %s", (message) => {
+    expect(formatBackupImportError(new Error(message))).toBe(
+      "备份文件不是完整 JSON，可能在导出、复制或上传过程中被截断。请重新从 PromptHub 导出完整的 JSON、PHUB 或 ZIP 文件后再导入。",
+    );
   });
 
   it("rejects an empty backup payload before clearing existing data", async () => {

@@ -18,10 +18,22 @@ import {
   AlertTriangleIcon,
   InfoIcon,
   CheckCircleIcon,
+  Loader2Icon,
+  StickyNoteIcon,
+  XIcon,
 } from "lucide-react";
 import { SkillIcon } from "./SkillIcon";
 import { SkillCodePane } from "./SkillCodePane";
-import { useState, useEffect, useMemo, useRef } from "react";
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useId,
+  useState,
+  useEffect,
+  useMemo,
+  useRef,
+} from "react";
 import { SkillPlatformPanel } from "./SkillPlatformPanel";
 import { ProjectSkillPreviewSidebar } from "./ProjectSkillPreviewSidebar";
 import { SkillPreviewPane } from "./SkillPreviewPane";
@@ -30,10 +42,8 @@ import { useSkillStore } from "../../stores/skill.store";
 import { useSettingsStore } from "../../stores/settings.store";
 import { useToast } from "../ui/Toast";
 import { UnsavedChangesDialog } from "../ui/UnsavedChangesDialog";
-import { EditSkillModal } from "./EditSkillModal";
-import { SkillFileEditor } from "./SkillFileEditor";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
-import { Modal, Textarea } from "../ui";
+import { Modal, Spinner, Textarea } from "../ui";
 import "highlight.js/styles/github-dark.css";
 import "./SkillMarkdown.css";
 import {
@@ -46,20 +56,29 @@ import {
   groupSkillSafetyFindings,
   resolveSkillDescription,
 } from "./detail-utils";
-import { computeSkillContentFingerprint } from "../../services/skill-store-update";
+import {
+  computeSkillContentFingerprint,
+  type RegistrySkillUpdateStatus,
+} from "../../services/skill-store-update";
 import {
   isSkillTranslationStale,
   readSkillTranslationSidecar,
   writeSkillTranslationSidecar,
   type SkillTranslationSidecar,
 } from "../../services/skill-translation-sidecar";
+import {
+  readSkillUserSidecar,
+  writeSkillUserSidecar,
+} from "../../services/skill-user-sidecar";
 import { scheduleAllSaveSync } from "../../services/webdav-save-sync";
 import { useSkillPlatform } from "./use-skill-platform";
 import { SkillVersionHistoryModal } from "./SkillVersionHistoryModal";
 import type { SkillSafetyReport } from "@prompthub/shared/types";
 import {
+  getDeployedProjectSkillTargets,
   getDeployableProjectTargetDirs,
-  getMissingProjectTargetDirs,
+  getProjectTargetDirsRequiringDeployment,
+  type ProjectDeployedSkillTarget,
 } from "../../services/project-skill-targets";
 import {
   getSkillSafetyFindingTitle,
@@ -69,9 +88,24 @@ import {
 import { getRuntimeCapabilities } from "../../runtime";
 import type { Skill } from "@prompthub/shared/types";
 import type { SkillProject } from "@prompthub/shared/types";
+import { copyTextToClipboard } from "../../utils/clipboard";
 import type { ProjectDetailSkillContext } from "./project-detail-adapter";
+import { PlatformIcon } from "../ui/PlatformIcon";
+import { AgentSkillPreviewSidebar } from "./AgentSkillPreviewSidebar";
+import { AgentSkillDetailActions } from "./AgentSkillDetailActions";
 
 const OPEN_CREATE_SKILL_PROJECT_MODAL_EVENT = "open-create-skill-project-modal";
+
+const LazySkillFileEditor = lazy(() =>
+  import("./SkillFileEditor").then((module) => ({
+    default: module.SkillFileEditor,
+  })),
+);
+const LazyEditSkillModal = lazy(() =>
+  import("./EditSkillModal").then((module) => ({
+    default: module.EditSkillModal,
+  })),
+);
 
 function getProjectDeployTargets(project: SkillProject): string[] {
   const configured = Array.isArray(project.deployTargets)
@@ -97,6 +131,15 @@ export type InstallMode = "copy" | "symlink";
 interface SkillFullDetailPageProps {
   overrideSkill?: Skill;
   projectContext?: ProjectDetailSkillContext | null;
+  agentContext?: {
+    installMode: "copy" | "symlink";
+    isManaged?: boolean;
+    isPlatformBuiltin?: boolean;
+    platformId: string;
+    platformName: string;
+    sourcePath: string;
+    symlinkTargetPath?: string;
+  } | null;
   projectActions?: {
     isImporting?: boolean;
     isDeploying?: boolean;
@@ -104,13 +147,25 @@ interface SkillFullDetailPageProps {
     onAddDeployTarget?: () => void | Promise<void>;
     onDeployToProjectTargets?: (targetDirs: string[]) => void | Promise<void>;
     onImport?: () => void | Promise<void>;
+    onOpenManagedSkill?: () => void | Promise<void>;
     onRemoveFromProject?: () => void | Promise<void>;
+  } | null;
+  agentActions?: {
+    isImporting?: boolean;
+    isUninstalling?: boolean;
+    onImport?: () => void | Promise<void>;
+    onOpenFolder?: () => void | Promise<void>;
+    onOpenManagedSkill?: () => void | Promise<void>;
+    onOpenSymlinkTarget?: () => void | Promise<void>;
+    onUninstall?: () => void | Promise<void>;
   } | null;
   onBack?: () => void;
 }
 
 export function SkillFullDetailPage({
   overrideSkill,
+  agentActions,
+  agentContext,
   projectContext,
   projectActions,
   onBack,
@@ -128,6 +183,12 @@ export function SkillFullDetailPage({
   const saveSafetyReport = useSkillStore((state) => state.saveSafetyReport);
   const projectScanState = useSkillStore((state) => state.projectScanState);
   const scanProjectSkills = useSkillStore((state) => state.scanProjectSkills);
+  const getInstalledSkillSourceUpdateStatus = useSkillStore(
+    (state) => state.getInstalledSkillSourceUpdateStatus,
+  );
+  const updateInstalledSkillFromSource = useSkillStore(
+    (state) => state.updateInstalledSkillFromSource,
+  );
 
   const selectedSkill = useMemo(() => {
     if (overrideSkill) {
@@ -135,9 +196,20 @@ export function SkillFullDetailPage({
     }
     return skills.find((s) => s.id === selectedSkillId);
   }, [overrideSkill, skills, selectedSkillId]);
+  const displayCurrentVersion = Math.max(selectedSkill?.currentVersion ?? 0, 1);
   const isProjectDetail = Boolean(projectContext);
+  const isAgentDetail = Boolean(agentContext);
+  const isExternalDetail = isProjectDetail || isAgentDetail;
+  const selectedSkillRecordId = selectedSkill?.id ?? null;
+  const deleteCopyInstallationsInputId = useId();
+  const deleteCopyInstallationsLabelId = useId();
+  const deleteCopyInstallationsHelpId = useId();
 
   const [copyStatus, setCopyStatus] = useState<Record<string, boolean>>({});
+  const copyStatusTimersRef = useRef<
+    Record<string, ReturnType<typeof setTimeout>>
+  >({});
+  const isMountedRef = useRef(true);
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<"preview" | "code" | "files">(
     "preview",
@@ -164,11 +236,18 @@ export function SkillFullDetailPage({
     (state) => state.setProjectSkillImportPreferences,
   );
   const aiModels = useSettingsStore((state) => state.aiModels);
-  const updateSkillProject = useSettingsStore((state) => state.updateSkillProject);
+  const updateSkillProject = useSettingsStore(
+    (state) => state.updateSkillProject,
+  );
   const [installMode, setInstallMode] = useState<InstallMode>(
     () => skillInstallMethod,
   );
   const [isDeleteConfirmOpen, setIsDeleteConfirmOpen] = useState(false);
+  const [isDeletingSkill, setIsDeletingSkill] = useState(false);
+  const [pendingUninstallPlatform, setPendingUninstallPlatform] = useState<
+    string | null
+  >(null);
+  const [isUninstallingPlatform, setIsUninstallingPlatform] = useState(false);
   const [isTranslating, setIsTranslating] = useState(false);
   const [showTranslation, setShowTranslation] = useState(false);
   const [showBackToTop, setShowBackToTop] = useState(false);
@@ -180,7 +259,28 @@ export function SkillFullDetailPage({
   );
   const [isSnapshotModalOpen, setIsSnapshotModalOpen] = useState(false);
   const [isCreatingSnapshot, setIsCreatingSnapshot] = useState(false);
+  const [isCheckingSourceUpdate, setIsCheckingSourceUpdate] = useState(false);
+  const [isUpdatingSource, setIsUpdatingSource] = useState(false);
+  const [skillUserNotes, setSkillUserNotes] = useState("");
+  const [draftSkillUserNotes, setDraftSkillUserNotes] = useState("");
+  const [isEditingUserNotes, setIsEditingUserNotes] = useState(false);
+  const [isLoadingUserNotes, setIsLoadingUserNotes] = useState(false);
+  const [isSavingUserNotes, setIsSavingUserNotes] = useState(false);
+  const [sourceUpdateStatus, setSourceUpdateStatus] =
+    useState<RegistrySkillUpdateStatus | null>(null);
   const [isProjectDeploying, setIsProjectDeploying] = useState(false);
+  const [deleteCopyInstallations, setDeleteCopyInstallations] = useState(false);
+  const [
+    projectDeleteDistributionSummary,
+    setProjectDeleteDistributionSummary,
+  ] = useState({
+    hasCopy: false,
+    hasSymlink: false,
+  });
+  const [pendingProjectRemoval, setPendingProjectRemoval] = useState<{
+    project: SkillProject;
+    targets: ProjectDeployedSkillTarget[];
+  } | null>(null);
   const [projectDeployMode, setProjectDeployMode] = useState<InstallMode>(
     () => projectSkillImportModePreference,
   );
@@ -193,11 +293,59 @@ export function SkillFullDetailPage({
     (() => void) | null
   >(null);
   const translateContent = useSkillStore((state) => state.translateContent);
-  const getTranslationState = useSkillStore((state) => state.getTranslationState);
+  const getTranslationState = useSkillStore(
+    (state) => state.getTranslationState,
+  );
   const clearTranslation = useSkillStore((state) => state.clearTranslation);
   const contentScrollRef = useRef<HTMLDivElement>(null);
   const stalePromptFingerprintRef = useRef<string | null>(null);
+  const translationInFlightRef = useRef(false);
+  const safetyScanInFlightRef =
+    useRef<Promise<SkillSafetyReport | null> | null>(null);
+  const sourceUpdateCheckInFlightRef = useRef(false);
+  const sourceUpdateInFlightRef = useRef(false);
+  const userNotesSaveInFlightRef = useRef(false);
+  const snapshotCreateInFlightRef = useRef(false);
+  const deleteInFlightRef = useRef(false);
+  const platformInstallInFlightRef = useRef(false);
+  const platformUninstallInFlightRef = useRef(false);
+  const projectDeployInFlightRef = useRef(false);
+  const projectRemovalInFlightRef = useRef(false);
   const [isRetranslatePromptOpen, setIsRetranslatePromptOpen] = useState(false);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+
+    return () => {
+      isMountedRef.current = false;
+      Object.values(copyStatusTimersRef.current).forEach((timer) => {
+        clearTimeout(timer);
+      });
+      copyStatusTimersRef.current = {};
+    };
+  }, []);
+
+  const clearCopyStatusTimer = useCallback((key: string) => {
+    const timer = copyStatusTimersRef.current[key];
+    if (timer) {
+      clearTimeout(timer);
+      delete copyStatusTimersRef.current[key];
+    }
+  }, []);
+
+  const scheduleCopyStatusReset = useCallback(
+    (key: string) => {
+      clearCopyStatusTimer(key);
+      copyStatusTimersRef.current[key] = setTimeout(() => {
+        if (!isMountedRef.current) {
+          return;
+        }
+        setCopyStatus((current) => ({ ...current, [key]: false }));
+        delete copyStatusTimersRef.current[key];
+      }, 2000);
+    },
+    [clearCopyStatusTimer],
+  );
   const buildDefaultSnapshotNote = () =>
     t("skill.snapshotDefaultNote", {
       timestamp: new Date().toLocaleString(i18n.language || undefined),
@@ -213,7 +361,11 @@ export function SkillFullDetailPage({
     projectIds: string[],
     targetDirsByProjectId?: Record<string, string[]>,
   ) => {
-    if (!selectedSkill || projectIds.length === 0) {
+    if (
+      !selectedSkill ||
+      projectIds.length === 0 ||
+      projectDeployInFlightRef.current
+    ) {
       return;
     }
 
@@ -225,7 +377,9 @@ export function SkillFullDetailPage({
       targetDirs:
         targetDirsByProjectId?.[project.id] ?? getProjectDeployTargets(project),
     }));
-    if (!selectedProjectTargets.some(({ targetDirs }) => targetDirs.length > 0)) {
+    if (
+      !selectedProjectTargets.some(({ targetDirs }) => targetDirs.length > 0)
+    ) {
       showToast(
         t(
           "skill.projectDeployNoTargets",
@@ -236,12 +390,16 @@ export function SkillFullDetailPage({
       return;
     }
 
+    projectDeployInFlightRef.current = true;
     setIsProjectDeploying(true);
     try {
       const repoPath = await window.api.skill.getRepoPath(selectedSkill.id);
       if (!repoPath) {
         showToast(
-          t("skill.projectDeployMissingSource", "Missing local skill source path."),
+          t(
+            "skill.projectDeployMissingSource",
+            "Missing local skill source path.",
+          ),
           "error",
         );
         return;
@@ -257,7 +415,11 @@ export function SkillFullDetailPage({
           ),
         }),
       );
-      if (!deployableProjectTargets.some(({ targetDirs }) => targetDirs.length > 0)) {
+      if (
+        !deployableProjectTargets.some(
+          ({ targetDirs }) => targetDirs.length > 0,
+        )
+      ) {
         showToast(
           t(
             "skill.projectDeployAlreadyAtTarget",
@@ -268,14 +430,17 @@ export function SkillFullDetailPage({
         return;
       }
 
-      const projectTargetJobs = deployableProjectTargets.flatMap(({ project, targetDirs }) => {
-        const scannedSkills = projectScanState[project.id]?.scannedSkills ?? [];
-        return getMissingProjectTargetDirs(
-          scannedSkills,
-          selectedSkill.name,
-          targetDirs,
-        ).map((targetDir) => ({ project, targetDir }));
-      });
+      const projectTargetJobs = deployableProjectTargets.flatMap(
+        ({ project, targetDirs }) => {
+          const scannedSkills =
+            projectScanState[project.id]?.scannedSkills ?? [];
+          return getProjectTargetDirsRequiringDeployment(
+            scannedSkills,
+            selectedSkill,
+            targetDirs,
+          ).map((targetDir) => ({ project, targetDir }));
+        },
+      );
       if (projectTargetJobs.length === 0) {
         showToast(
           t(
@@ -293,7 +458,7 @@ export function SkillFullDetailPage({
             repoPath,
             selectedSkill.name,
             targetDir,
-            { ifExists: "skip", mode: projectDeployMode },
+            { ifExists: "overwrite", mode: projectDeployMode },
           ),
         ),
       );
@@ -331,6 +496,7 @@ export function SkillFullDetailPage({
         "error",
       );
     } finally {
+      projectDeployInFlightRef.current = false;
       setIsProjectDeploying(false);
     }
   };
@@ -342,6 +508,91 @@ export function SkillFullDetailPage({
   const handleSetProjectDeployMode = (mode: InstallMode) => {
     setProjectDeployMode(mode);
     setProjectSkillImportModePreference(mode);
+  };
+
+  const getProjectDeployedTargets = (project: SkillProject) => {
+    if (!selectedSkill) {
+      return [];
+    }
+    const scannedSkills = projectScanState[project.id]?.scannedSkills ?? [];
+    return getDeployedProjectSkillTargets(
+      scannedSkills,
+      selectedSkill.name,
+      getProjectDeployTargets(project),
+    );
+  };
+
+  const requestRemoveFromProjectTargets = (
+    projectId: string,
+    targets: ProjectDeployedSkillTarget[],
+  ) => {
+    const project = skillProjects.find((entry) => entry.id === projectId);
+    if (!project || targets.length === 0) {
+      return;
+    }
+    setPendingProjectRemoval({ project, targets });
+  };
+
+  const getAllProjectDeployedTargets = () =>
+    skillProjects.flatMap((project) =>
+      getProjectDeployedTargets(project).map((target) => ({ project, target })),
+    );
+
+  const inspectProjectDeleteDistribution = async () => {
+    const targets = getAllProjectDeployedTargets();
+    if (targets.length === 0) {
+      return;
+    }
+    const statuses = await Promise.all(
+      targets.map(({ target }) =>
+        window.api.skill.getLocalPathStatus(target.localPath),
+      ),
+    );
+    setProjectDeleteDistributionSummary({
+      hasCopy: statuses.some(
+        (status) => status.exists && status.mode !== "symlink",
+      ),
+      hasSymlink: statuses.some(
+        (status) => status.exists && status.mode === "symlink",
+      ),
+    });
+  };
+
+  const confirmRemoveFromProjectTargets = async () => {
+    if (!pendingProjectRemoval || projectRemovalInFlightRef.current) {
+      return;
+    }
+    const { project, targets } = pendingProjectRemoval;
+    projectRemovalInFlightRef.current = true;
+    setIsProjectDeploying(true);
+    try {
+      await Promise.all(
+        targets.map((target) =>
+          window.api.skill.deleteLocalFileByPath(target.localPath, "."),
+        ),
+      );
+      showToast(
+        t("skill.projectRemoveDistributionSuccess", {
+          count: targets.length,
+          defaultValue: "Removed from {{count}} project folder(s).",
+        }),
+        "success",
+      );
+      await scanProjectSkills(project);
+      updateSkillProject(project.id, { lastScannedAt: Date.now() });
+    } catch (error) {
+      showToast(
+        t("skill.projectRemoveDistributionFailed", {
+          reason: getErrorMessage(error),
+          defaultValue: "Failed to remove project skill: {{reason}}",
+        }),
+        "error",
+      );
+    } finally {
+      projectRemovalInFlightRef.current = false;
+      setIsProjectDeploying(false);
+      setPendingProjectRemoval(null);
+    }
   };
 
   const targetLang = useMemo(() => {
@@ -413,10 +664,16 @@ export function SkillFullDetailPage({
 
   useEffect(() => {
     if (selectedSkill) {
+      setCopyStatus({});
+      Object.values(copyStatusTimersRef.current).forEach((timer) => {
+        clearTimeout(timer);
+      });
+      copyStatusTimersRef.current = {};
       stalePromptFingerprintRef.current = null;
       setShowTranslation(false);
       setIsRetranslatePromptOpen(false);
       setTranslationSidecar(null);
+      setSourceUpdateStatus(null);
       setResolvedSkillMdContent(
         selectedSkill.instructions || selectedSkill.content || "",
       );
@@ -448,7 +705,7 @@ export function SkillFullDetailPage({
         return;
       }
 
-      if (isProjectDetail) {
+      if (isExternalDetail) {
         try {
           const localSkillDirectory = normalizeLocalSkillDirectoryPath(
             selectedSkill.local_repo_path || selectedSkill.source_url || "",
@@ -505,9 +762,49 @@ export function SkillFullDetailPage({
     selectedSkill?.instructions,
     selectedSkill?.content,
     selectedSkill?.updated_at,
-    isProjectDetail,
+    isExternalDetail,
     syncSkillFromRepo,
   ]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadUserNotes() {
+      if (!selectedSkillRecordId || isExternalDetail) {
+        setSkillUserNotes("");
+        setDraftSkillUserNotes("");
+        setIsEditingUserNotes(false);
+        return;
+      }
+
+      setIsLoadingUserNotes(true);
+      try {
+        const sidecar = await readSkillUserSidecar(selectedSkillRecordId);
+        if (!cancelled) {
+          const notes = sidecar?.notes ?? "";
+          setSkillUserNotes(notes);
+          setDraftSkillUserNotes(notes);
+          setIsEditingUserNotes(false);
+        }
+      } catch {
+        if (!cancelled) {
+          setSkillUserNotes("");
+          setDraftSkillUserNotes("");
+          setIsEditingUserNotes(false);
+        }
+      } finally {
+        if (!cancelled) {
+          setIsLoadingUserNotes(false);
+        }
+      }
+    }
+
+    void loadUserNotes();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isExternalDetail, selectedSkillRecordId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -518,7 +815,7 @@ export function SkillFullDetailPage({
         return;
       }
 
-      if (isProjectDetail) {
+      if (isExternalDetail) {
         setTranslationSidecar(null);
         return;
       }
@@ -545,7 +842,7 @@ export function SkillFullDetailPage({
     return () => {
       cancelled = true;
     };
-  }, [isProjectDetail, selectedSkill?.id, targetLang, translationMode]);
+  }, [isExternalDetail, selectedSkill?.id, targetLang, translationMode]);
 
   useEffect(() => {
     if (!selectedSkill || !resolvedSkillMdContent.trim()) {
@@ -558,7 +855,9 @@ export function SkillFullDetailPage({
       return;
     }
 
-    if (stalePromptFingerprintRef.current === instructionsTranslationFingerprint) {
+    if (
+      stalePromptFingerprintRef.current === instructionsTranslationFingerprint
+    ) {
       return;
     }
 
@@ -572,7 +871,7 @@ export function SkillFullDetailPage({
   ]);
 
   useEffect(() => {
-    if (!selectedSkill || !autoScanInstalledSkills) {
+    if (!selectedSkill || !autoScanInstalledSkills || isAgentDetail) {
       return;
     }
 
@@ -622,12 +921,14 @@ export function SkillFullDetailPage({
     autoScanInstalledSkills,
     resolvedSkillMdContent,
     selectedSkill,
+    isAgentDetail,
   ]);
   const {
     availablePlatforms,
     batchInstall: installSelectedPlatforms,
     deselectAllPlatforms,
     installProgress,
+    installDetails: skillMdInstallDetails = {},
     installStatus: skillMdInstallStatus,
     isBatchInstalling,
     selectedPlatforms,
@@ -638,15 +939,39 @@ export function SkillFullDetailPage({
   } = useSkillPlatform(selectedSkill, installMode);
 
   const batchInstall = async () => {
+    if (platformInstallInFlightRef.current) {
+      return;
+    }
+    platformInstallInFlightRef.current = true;
     try {
       const result = await installSelectedPlatforms();
       if (result.successCount > 0) {
-        const modeLabel =
-          installMode === "symlink"
-            ? t("skill.symlink", "Symlink")
-            : t("skill.copyMode", "Copy");
+        const failedPlatformIds = new Set(
+          result.failures.map((failure) => failure.platformId),
+        );
+        const successfulPlatforms = Array.from(selectedPlatforms)
+          .filter((platformId) => !failedPlatformIds.has(platformId))
+          .slice(0, result.successCount)
+          .map(
+            (platformId) =>
+              availablePlatforms.find((entry) => entry.id === platformId)
+                ?.name ?? platformId,
+          );
         showToast(
-          `${t("skill.installSuccess", "Installation successful")} (${modeLabel}) — ${result.successCount}/${result.totalCount}`,
+          successfulPlatforms.length === 1
+            ? t("skill.installToPlatformSuccess", {
+                skill: selectedSkill.name,
+                platform: successfulPlatforms[0],
+                defaultValue:
+                  "{{skill}} installed to {{platform}} successfully",
+              })
+            : t("skill.installToPlatformsSuccess", {
+                skill: selectedSkill.name,
+                count: result.successCount,
+                platforms: successfulPlatforms.join(", "),
+                defaultValue:
+                  "{{skill}} installed to {{count}} platforms successfully: {{platforms}}",
+              }),
           "success",
         );
       }
@@ -660,7 +985,8 @@ export function SkillFullDetailPage({
             return t("skill.installFallbackRow", {
               platform: label,
               reason: fallback.reason,
-              defaultValue: "{{platform}}: switched to copy install ({{reason}})",
+              defaultValue:
+                "{{platform}}: switched to copy install ({{reason}})",
             });
           })
           .join("\n");
@@ -694,8 +1020,7 @@ export function SkillFullDetailPage({
         showToast(
           t("skill.installPartialFailure", {
             details,
-            defaultValue:
-              "Some platforms could not be installed\n{{details}}",
+            defaultValue: "Some platforms could not be installed\n{{details}}",
           }),
           "error",
         );
@@ -706,10 +1031,24 @@ export function SkillFullDetailPage({
         `${t("skill.updateFailed")}: ${getErrorMessage(error)}`,
         "error",
       );
+    } finally {
+      platformInstallInFlightRef.current = false;
     }
   };
 
-  const uninstallFromPlatform = async (platformId: string) => {
+  const requestUninstallFromPlatform = (platformId: string) => {
+    setPendingUninstallPlatform(platformId);
+  };
+
+  const confirmUninstallFromPlatform = async () => {
+    if (!pendingUninstallPlatform || platformUninstallInFlightRef.current) {
+      return;
+    }
+
+    const platformId = pendingUninstallPlatform;
+    platformUninstallInFlightRef.current = true;
+    setIsUninstallingPlatform(true);
+
     try {
       await uninstallSkillFromPlatform(platformId);
       showToast(t("skill.uninstallSuccess", "Uninstall successful"), "success");
@@ -719,47 +1058,224 @@ export function SkillFullDetailPage({
         `${t("skill.updateFailed")}: ${getErrorMessage(error)}`,
         "error",
       );
+    } finally {
+      platformUninstallInFlightRef.current = false;
+      setIsUninstallingPlatform(false);
+      setPendingUninstallPlatform(null);
     }
   };
 
   if (!selectedSkill) return null;
 
-  const runSafetyScan = async () => {
-    setIsScanningSafety(true);
-    try {
-      const report = await window.api.skill.scanSafety({
-        name: selectedSkill.name,
-        content:
-          resolvedSkillMdContent ||
-          selectedSkill.instructions ||
-          selectedSkill.content,
-        sourceUrl: selectedSkill.source_url,
-        contentUrl: selectedSkill.content_url,
-        localRepoPath: selectedSkill.local_repo_path,
-        aiConfig: getSafetyScanAIConfig(aiModels),
-      });
-      setSafetyReport(report);
-      // Persist to DB + update store
+  const hasSourceUpdateMetadata = Boolean(
+    !isExternalDetail &&
+    (selectedSkill.source_url || selectedSkill.content_url),
+  );
+  const showApplySourceUpdate = sourceUpdateStatus === "update-available";
+  const showOverwriteSourceUpdate =
+    sourceUpdateStatus === "local-modified" || sourceUpdateStatus === "conflict";
+  const sourceUpdateButtonLabel = showApplySourceUpdate
+    ? t("skill.updateFromSource", "Update from Source")
+    : t("skill.checkSourceUpdatesAction", "Check Source Updates");
+  const overwriteSourceUpdateLabel = t(
+    "skill.overwriteLocalChanges",
+    "Overwrite local changes",
+  );
+  const createSnapshotLabel = t("skill.createSnapshot", "Create Snapshot");
+  const installedPlatformDetails = Object.values(skillMdInstallDetails).filter(
+    (status) => status.installed,
+  );
+  const hasCopyInstallations =
+    installedPlatformDetails.some(
+      (status) => status.mode === "copy" || !status.mode,
+    ) || projectDeleteDistributionSummary.hasCopy;
+  const hasSymlinkInstallations =
+    installedPlatformDetails.some((status) => status.mode === "symlink") ||
+    projectDeleteDistributionSummary.hasSymlink;
+  const hasDistributedInstallations =
+    installedPlatformDetails.length > 0 ||
+    projectDeleteDistributionSummary.hasCopy ||
+    projectDeleteDistributionSummary.hasSymlink;
+
+  const runSafetyScan = () => {
+    if (safetyScanInFlightRef.current) {
+      return safetyScanInFlightRef.current;
+    }
+
+    let scanPromise: Promise<SkillSafetyReport | null>;
+    scanPromise = (async () => {
+      setIsScanningSafety(true);
       try {
-        await saveSafetyReport(selectedSkill.id, report);
-      } catch (err) {
-        console.warn("Failed to persist safety report:", err);
+        const report = await window.api.skill.scanSafety({
+          name: selectedSkill.name,
+          content:
+            resolvedSkillMdContent ||
+            selectedSkill.instructions ||
+            selectedSkill.content,
+          sourceUrl: selectedSkill.source_url,
+          contentUrl: selectedSkill.content_url,
+          localRepoPath: selectedSkill.local_repo_path,
+          aiConfig: getSafetyScanAIConfig(aiModels),
+        });
+        setSafetyReport(report);
+        // Persist to DB + update store
+        try {
+          await saveSafetyReport(selectedSkill.id, report);
+        } catch (err) {
+          console.warn("Failed to persist safety report:", err);
+        }
+        return report;
+      } catch (error) {
+        showToast(formatSkillSafetyScanError(error, t), "error");
+        return null;
+      } finally {
+        if (safetyScanInFlightRef.current === scanPromise) {
+          safetyScanInFlightRef.current = null;
+          setIsScanningSafety(false);
+        }
       }
-      return report;
+    })();
+    safetyScanInFlightRef.current = scanPromise;
+    return scanPromise;
+  };
+
+  const showSourceUpdateToast = (status: RegistrySkillUpdateStatus) => {
+    if (status === "update-available") {
+      showToast(t("skill.sourceUpdateAvailable", "Update available"), "info");
+      return;
+    }
+    if (status === "up-to-date") {
+      showToast(t("skill.sourceUpToDate", "Already up to date"), "success");
+      return;
+    }
+    if (status === "local-modified") {
+      showToast(
+        t(
+          "skill.sourceUpdateLocalModified",
+          "Local changes detected. Create a snapshot or review changes before updating.",
+        ),
+        "warning",
+      );
+      return;
+    }
+    if (status === "conflict") {
+      showToast(
+        t(
+          "skill.sourceUpdateConflict",
+          "Source and local content both changed. Review versions before overwriting.",
+        ),
+        "warning",
+      );
+      return;
+    }
+
+    showToast(
+      t("skill.sourceUpdateUnavailable", "No source update target found"),
+      "error",
+    );
+  };
+
+  const handleCheckSourceUpdate = async () => {
+    if (!selectedSkill) return;
+    if (sourceUpdateCheckInFlightRef.current) {
+      return;
+    }
+    sourceUpdateCheckInFlightRef.current = true;
+
+    setIsCheckingSourceUpdate(true);
+    try {
+      const check = await getInstalledSkillSourceUpdateStatus(selectedSkill.id);
+      if (!check) {
+        setSourceUpdateStatus(null);
+        showToast(
+          t("skill.sourceUpdateUnavailable", "No source update target found"),
+          "error",
+        );
+        return;
+      }
+
+      setSourceUpdateStatus(check.status);
+      showSourceUpdateToast(check.status);
     } catch (error) {
-      showToast(formatSkillSafetyScanError(error, t), "error");
-      return null;
+      console.error("Failed to check source updates:", error);
+      showToast(
+        `${t("skill.updateFailed", "Update failed")}: ${getErrorMessage(error)}`,
+        "error",
+      );
     } finally {
-      setIsScanningSafety(false);
+      sourceUpdateCheckInFlightRef.current = false;
+      setIsCheckingSourceUpdate(false);
     }
   };
 
-  const handleCopy = (text: string, key: string) => {
-    navigator.clipboard.writeText(text);
-    setCopyStatus({ ...copyStatus, [key]: true });
-    setTimeout(() => {
-      setCopyStatus({ ...copyStatus, [key]: false });
-    }, 2000);
+  const handleUpdateFromSource = async (overwriteLocalChanges = false) => {
+    if (!selectedSkill) return;
+    if (sourceUpdateInFlightRef.current) {
+      return;
+    }
+    sourceUpdateInFlightRef.current = true;
+
+    setIsUpdatingSource(true);
+    try {
+      const result = overwriteLocalChanges
+        ? await updateInstalledSkillFromSource(selectedSkill.id, {
+          overwriteLocalChanges: true,
+        })
+        : await updateInstalledSkillFromSource(selectedSkill.id);
+      if (!result) {
+        showToast(
+          t("skill.sourceUpdateUnavailable", "No source update target found"),
+          "error",
+        );
+        return;
+      }
+      if (result.status !== "updated") {
+        setSourceUpdateStatus(result.check.status);
+        showSourceUpdateToast(result.check.status);
+        return;
+      }
+
+      setSourceUpdateStatus("up-to-date");
+      await loadSkills();
+      showToast(
+        t("skill.sourceUpdateSuccess", "Updated from source"),
+        "success",
+      );
+    } catch (error) {
+      console.error("Failed to update from source:", error);
+      showToast(
+        `${t("skill.updateFailed", "Update failed")}: ${getErrorMessage(error)}`,
+        "error",
+      );
+    } finally {
+      sourceUpdateInFlightRef.current = false;
+      setIsUpdatingSource(false);
+    }
+  };
+
+  const handleCopy = async (text: string, key: string) => {
+    try {
+      await copyTextToClipboard(text);
+      setCopyStatus((current) => ({ ...current, [key]: true }));
+      scheduleCopyStatusReset(key);
+    } catch (error) {
+      console.error("Failed to copy skill content:", error);
+      showToast(t("common.copyFailed", "Copy failed"), "error");
+    }
+  };
+
+  const handleCopySkillTitle = async () => {
+    if (!selectedSkill?.name) {
+      return;
+    }
+
+    try {
+      await copyTextToClipboard(selectedSkill.name);
+      showToast(t("common.copied", "Copied"), "success");
+    } catch (error) {
+      console.error("Failed to copy skill title:", error);
+      showToast(t("common.copyFailed", "Copy failed"), "error");
+    }
   };
 
   const handleExport = async (format: "skillmd" | "zip") => {
@@ -773,10 +1289,12 @@ export function SkillFullDetailPage({
         downloadSkillExport(content, selectedSkill.name, format);
       }
 
-      setCopyStatus({ ...copyStatus, [`export_${format}`]: true });
-      setTimeout(() => {
-        setCopyStatus({ ...copyStatus, [`export_${format}`]: false });
-      }, 2000);
+      if (!isMountedRef.current) {
+        return;
+      }
+      const statusKey = `export_${format}`;
+      setCopyStatus((current) => ({ ...current, [statusKey]: true }));
+      scheduleCopyStatusReset(statusKey);
     } catch (error) {
       showToast(
         `${t("skill.exportFailed", "Export failed")}: ${getErrorMessage(error)}`,
@@ -786,17 +1304,61 @@ export function SkillFullDetailPage({
   };
 
   const handleDelete = () => {
-    if (isProjectDetail) return;
+    if (isExternalDetail) return;
     if (!selectedSkill) return;
+    setDeleteCopyInstallations(false);
+    setProjectDeleteDistributionSummary({ hasCopy: false, hasSymlink: false });
     setIsDeleteConfirmOpen(true);
+    void inspectProjectDeleteDistribution().catch((error) => {
+      console.warn(
+        "Failed to inspect project distributions before delete:",
+        error,
+      );
+    });
   };
 
   const confirmDelete = async () => {
-    if (isProjectDetail) return;
+    if (isExternalDetail) return;
     if (!selectedSkill) return;
-    await deleteSkill(selectedSkill.id);
-    setIsDeleteConfirmOpen(false);
-    selectSkill(null);
+    if (deleteInFlightRef.current) {
+      return;
+    }
+    deleteInFlightRef.current = true;
+    setIsDeletingSkill(true);
+    try {
+      const projectTargets = getAllProjectDeployedTargets();
+      const removableProjectTargets = await Promise.all(
+        projectTargets.map(async ({ target }) => {
+          const status = await window.api.skill.getLocalPathStatus(
+            target.localPath,
+          );
+          if (!status.exists) {
+            return null;
+          }
+          if (status.mode === "symlink" || deleteCopyInstallations) {
+            return target;
+          }
+          return null;
+        }),
+      );
+      await Promise.all(
+        removableProjectTargets
+          .filter((target): target is ProjectDeployedSkillTarget =>
+            Boolean(target),
+          )
+          .map((target) =>
+            window.api.skill.deleteLocalFileByPath(target.localPath, "."),
+          ),
+      );
+      await deleteSkill(selectedSkill.id, {
+        removeCopyInstallations: deleteCopyInstallations,
+      });
+      setIsDeleteConfirmOpen(false);
+      selectSkill(null);
+    } finally {
+      deleteInFlightRef.current = false;
+      setIsDeletingSkill(false);
+    }
   };
 
   const handleTranslateSkill = async (forceRefresh = false) => {
@@ -806,6 +1368,10 @@ export function SkillFullDetailPage({
       setShowTranslation(!showTranslation);
       return;
     }
+    if (translationInFlightRef.current) {
+      return;
+    }
+    translationInFlightRef.current = true;
 
     setIsTranslating(true);
     try {
@@ -827,7 +1393,7 @@ export function SkillFullDetailPage({
         throw new Error("TRANSLATION_EMPTY");
       }
 
-      if (!isProjectDetail) {
+      if (!isExternalDetail) {
         const nextSidecar = await writeSkillTranslationSidecar({
           skillId: selectedSkill.id,
           sourceContent: resolvedSkillMdContent,
@@ -849,8 +1415,43 @@ export function SkillFullDetailPage({
     } catch (error: unknown) {
       showToast(formatSkillTranslationError(error, t), "error");
     } finally {
+      translationInFlightRef.current = false;
       setIsTranslating(false);
     }
+  };
+
+  const handleSaveUserNotes = async () => {
+    if (!selectedSkill || isExternalDetail) return;
+    if (userNotesSaveInFlightRef.current) {
+      return;
+    }
+    userNotesSaveInFlightRef.current = true;
+
+    setIsSavingUserNotes(true);
+    try {
+      const sidecar = await writeSkillUserSidecar({
+        skillId: selectedSkill.id,
+        notes: draftSkillUserNotes,
+      });
+      setSkillUserNotes(sidecar.notes);
+      setDraftSkillUserNotes(sidecar.notes);
+      setIsEditingUserNotes(false);
+      showToast(t("skill.userNotesSaved", "Notes saved"), "success");
+    } catch (error) {
+      console.error("Failed to save skill notes:", error);
+      showToast(
+        `${t("skill.updateFailed", "Update failed")}: ${getErrorMessage(error)}`,
+        "error",
+      );
+    } finally {
+      userNotesSaveInFlightRef.current = false;
+      setIsSavingUserNotes(false);
+    }
+  };
+
+  const handleCancelUserNotes = () => {
+    setDraftSkillUserNotes(skillUserNotes);
+    setIsEditingUserNotes(false);
   };
 
   const handleContentScroll = () => {
@@ -879,6 +1480,10 @@ export function SkillFullDetailPage({
 
   const handleCreateSnapshot = async () => {
     if (!selectedSkill) return;
+    if (snapshotCreateInFlightRef.current) {
+      return;
+    }
+    snapshotCreateInFlightRef.current = true;
 
     setIsCreatingSnapshot(true);
     try {
@@ -897,6 +1502,7 @@ export function SkillFullDetailPage({
         "error",
       );
     } finally {
+      snapshotCreateInFlightRef.current = false;
       setIsCreatingSnapshot(false);
     }
   };
@@ -907,6 +1513,7 @@ export function SkillFullDetailPage({
       <div className="flex items-center justify-between px-6 py-4 border-b border-border sticky top-0 app-wallpaper-panel-strong z-10">
         <div className="flex items-center gap-4">
           <button
+            type="button"
             onClick={() => {
               requestLeaveFileEditing(() => {
                 if (onBack) {
@@ -917,9 +1524,10 @@ export function SkillFullDetailPage({
               });
             }}
             className="p-2 -ml-2 text-muted-foreground hover:text-foreground hover:bg-accent rounded-lg transition-all active:scale-press-in"
+            aria-label={t("common.back", "Back")}
             title={t("common.back", "Back")}
           >
-            <ArrowLeftIcon className="w-5 h-5" />
+            <ArrowLeftIcon className="w-5 h-5" aria-hidden="true" />
           </button>
           <SkillIcon
             iconUrl={selectedSkill.icon_url}
@@ -929,36 +1537,191 @@ export function SkillFullDetailPage({
             size="lg"
           />
           <div>
-            <h2 className="font-bold text-xl text-foreground leading-tight">
-              {selectedSkill.name}
+            <h2 className="leading-tight">
+              <button
+                type="button"
+                className="block max-w-full cursor-default rounded-md text-left text-xl font-bold text-foreground transition-colors hover:text-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+                onClick={() => void handleCopySkillTitle()}
+                title={t("skill.copyTitle", {
+                  name: selectedSkill.name,
+                  defaultValue: "Copy title: {{name}}",
+                })}
+                aria-label={t("skill.copyTitle", {
+                  name: selectedSkill.name,
+                  defaultValue: "Copy title: {{name}}",
+                })}
+              >
+                {selectedSkill.name}
+              </button>
             </h2>
             <div className="mt-1 flex items-center gap-3 flex-wrap">
               <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground font-medium">
-                <GlobeIcon className="w-3.5 h-3.5" />
+                <GlobeIcon className="w-3.5 h-3.5" aria-hidden="true" />
                 {selectedSkill.author || t("skill.localStorage")}
               </div>
-              {!isProjectDetail ? (
+              {!isExternalDetail ? (
                 <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-primary">
                   {t("skill.currentVersion", "Version")} v
-                  {selectedSkill.currentVersion || 0}
+                  {displayCurrentVersion}
+                </span>
+              ) : null}
+              {agentContext ? (
+                <span className="inline-flex items-center gap-1.5 rounded-full bg-accent px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
+                  <span aria-hidden="true">
+                    <PlatformIcon
+                      platformId={agentContext.platformId}
+                      size={14}
+                    />
+                  </span>
+                  {agentContext.platformName}
+                </span>
+              ) : null}
+              {agentContext?.isPlatformBuiltin ? (
+                <span className="inline-flex items-center gap-1.5 rounded-full border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 text-[11px] font-medium text-sky-700 dark:text-sky-300">
+                  {t("skill.platformBuiltin", "Built-in")}
                 </span>
               ) : null}
             </div>
           </div>
         </div>
         <div className="flex items-center gap-2">
-          {!isProjectDetail ? (
+          {isProjectDetail && projectContext ? (
             <>
+              {projectContext.importedSkill ? (
+                <button
+                  type="button"
+                  onClick={() => void projectActions?.onOpenManagedSkill?.()}
+                  className="inline-flex items-center gap-2 rounded-full border border-border px-3 py-2 text-sm font-medium text-muted-foreground transition-all hover:border-primary/30 hover:bg-primary/5 hover:text-primary"
+                  title={t("skill.openInMySkills", "Open in My Skills")}
+                >
+                  <FolderOpenIcon className="h-4 w-4" aria-hidden="true" />
+                  {t("skill.openInMySkills", "Open in My Skills")}
+                </button>
+              ) : null}
               <button
+                type="button"
+                onClick={() =>
+                  void window.electron?.openPath?.(
+                    selectedSkill.local_repo_path ||
+                      selectedSkill.source_url ||
+                      "",
+                  )
+                }
+                className="inline-flex items-center gap-2 rounded-full border border-border px-3 py-2 text-sm font-medium text-muted-foreground transition-all hover:border-primary/30 hover:bg-primary/5 hover:text-primary"
+                title={t("skill.openLocalSource", "Open Local Skill Folder")}
+              >
+                <FolderOpenIcon className="h-4 w-4" aria-hidden="true" />
+                {t("common.open", "Open")}
+              </button>
+              {projectActions?.onRemoveFromProject ? (
+                <button
+                  type="button"
+                  onClick={() => void projectActions.onRemoveFromProject?.()}
+                  disabled={projectActions.isRemoving}
+                  className="inline-flex items-center gap-2 rounded-full border border-destructive/20 bg-destructive/5 px-3 py-2 text-sm font-medium text-destructive transition-all hover:bg-destructive/10 disabled:opacity-60"
+                  title={t("skill.removeFromProject", "Remove from Project")}
+                >
+                  {projectActions.isRemoving ? (
+                    <Loader2Icon
+                      className="h-4 w-4 animate-spin"
+                      aria-hidden="true"
+                    />
+                  ) : (
+                    <TrashIcon className="h-4 w-4" aria-hidden="true" />
+                  )}
+                  {t("skill.removeFromProject", "Remove from Project")}
+                </button>
+              ) : null}
+            </>
+          ) : null}
+          {isAgentDetail && agentContext ? (
+            <AgentSkillDetailActions
+              isImporting={agentActions?.isImporting}
+              isManaged={agentContext.isManaged}
+              isUninstallDisabled={agentContext.isPlatformBuiltin}
+              isUninstalling={agentActions?.isUninstalling}
+              onImport={agentActions?.onImport}
+              onOpenFolder={agentActions?.onOpenFolder}
+              onOpenManagedSkill={agentActions?.onOpenManagedSkill}
+              onUninstall={agentActions?.onUninstall}
+              t={t}
+              uninstallDisabledReason={t(
+                "skill.platformBuiltinCannotUninstall",
+                "Built-in skills cannot be removed from this agent.",
+              )}
+            />
+          ) : null}
+          {!isExternalDetail ? (
+            <>
+              {hasSourceUpdateMetadata ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={
+                      showApplySourceUpdate
+                        ? () => handleUpdateFromSource()
+                        : handleCheckSourceUpdate
+                    }
+                    disabled={isCheckingSourceUpdate || isUpdatingSource}
+                    className="inline-flex items-center gap-2 rounded-full border border-border px-3 py-2 text-sm font-medium text-muted-foreground transition-all hover:border-primary/30 hover:bg-primary/5 hover:text-primary disabled:opacity-50"
+                    title={sourceUpdateButtonLabel}
+                    aria-label={sourceUpdateButtonLabel}
+                  >
+                    {isCheckingSourceUpdate || isUpdatingSource ? (
+                      <Loader2Icon
+                        className="h-4 w-4 animate-spin"
+                        aria-hidden="true"
+                      />
+                    ) : showApplySourceUpdate ? (
+                      <RefreshCwIcon className="h-4 w-4" aria-hidden="true" />
+                    ) : (
+                      <CheckCircleIcon className="h-4 w-4" aria-hidden="true" />
+                    )}
+                    {isCheckingSourceUpdate
+                      ? t("skill.checkingUpdates", "Checking")
+                      : isUpdatingSource
+                        ? t("skill.updatingFromSource", "Updating")
+                        : showApplySourceUpdate
+                          ? t("skill.updateFromSource", "Update from Source")
+                          : t("skill.checkSourceUpdates", "Check Updates")}
+                  </button>
+                  {showOverwriteSourceUpdate ? (
+                    <button
+                      type="button"
+                      onClick={() => handleUpdateFromSource(true)}
+                      disabled={isUpdatingSource}
+                      className="inline-flex items-center gap-2 rounded-full border border-amber-500/25 bg-amber-500/10 px-3 py-2 text-sm font-medium text-amber-700 transition-all hover:bg-amber-500/20 disabled:opacity-50 dark:text-amber-300"
+                      title={overwriteSourceUpdateLabel}
+                      aria-label={overwriteSourceUpdateLabel}
+                    >
+                      {isUpdatingSource ? (
+                        <Loader2Icon
+                          className="h-4 w-4 animate-spin"
+                          aria-hidden="true"
+                        />
+                      ) : (
+                        <RefreshCwIcon
+                          className="h-4 w-4"
+                          aria-hidden="true"
+                        />
+                      )}
+                      {overwriteSourceUpdateLabel}
+                    </button>
+                  ) : null}
+                </>
+              ) : null}
+              <button
+                type="button"
                 onClick={openSnapshotModal}
                 disabled={isCreatingSnapshot}
                 className="inline-flex items-center gap-2 rounded-full border border-border px-3 py-2 text-sm font-medium text-muted-foreground transition-all hover:border-primary/30 hover:bg-primary/5 hover:text-primary disabled:opacity-50"
-                title={t("skill.createSnapshot", "Create Snapshot")}
+                title={createSnapshotLabel}
               >
-                <SaveIcon className="h-4 w-4" />
+                <SaveIcon className="h-4 w-4" aria-hidden="true" />
                 {t("skill.snapshot", "Snapshot")}
               </button>
               <button
+                type="button"
                 onClick={() => toggleFavorite(selectedSkill.id)}
                 className={`p-2.5 rounded-full transition-all active:scale-press-in ${
                   selectedSkill.is_favorite
@@ -970,31 +1733,43 @@ export function SkillFullDetailPage({
                     ? t("skill.removeFavorite", "Remove Favorite")
                     : t("skill.addFavorite", "Add to Favorites")
                 }
+                aria-label={
+                  selectedSkill.is_favorite
+                    ? t("skill.removeFavorite", "Remove Favorite")
+                    : t("skill.addFavorite", "Add to Favorites")
+                }
               >
                 <StarIcon
                   className={`w-5 h-5 ${selectedSkill.is_favorite ? "fill-current" : ""}`}
+                  aria-hidden="true"
                 />
               </button>
               <button
+                type="button"
                 onClick={() => setIsVersionHistoryOpen(true)}
                 className="p-2.5 text-muted-foreground hover:text-primary hover:bg-primary/10 rounded-full transition-all active:scale-press-in"
+                aria-label={t("skill.versionHistory", "Version History")}
                 title={t("skill.versionHistory", "Version History")}
               >
-                <HistoryIcon className="w-5 h-5" />
+                <HistoryIcon className="w-5 h-5" aria-hidden="true" />
               </button>
               <button
+                type="button"
                 onClick={() => setIsEditModalOpen(true)}
                 className="p-2.5 text-muted-foreground hover:text-primary hover:bg-primary/10 rounded-full transition-all active:scale-press-in"
+                aria-label={t("skill.edit", "Edit Skill")}
                 title={t("skill.edit", "Edit Skill")}
               >
-                <PencilIcon className="w-5 h-5" />
+                <PencilIcon className="w-5 h-5" aria-hidden="true" />
               </button>
               <button
+                type="button"
                 onClick={handleDelete}
                 className="p-2.5 text-muted-foreground hover:text-destructive hover:bg-destructive/10 rounded-full transition-all active:scale-press-in"
+                aria-label={t("common.delete", "Delete")}
                 title={t("common.delete", "Delete")}
               >
-                <TrashIcon className="w-5 h-5" />
+                <TrashIcon className="w-5 h-5" aria-hidden="true" />
               </button>
             </>
           ) : null}
@@ -1004,6 +1779,7 @@ export function SkillFullDetailPage({
       {/* Tabs */}
       <div className="flex items-center px-6 gap-6 border-b border-border bg-accent/20">
         <button
+          type="button"
           onClick={() => {
             requestLeaveFileEditing(() => {
               setActiveTab("preview");
@@ -1012,7 +1788,7 @@ export function SkillFullDetailPage({
           className={`py-3 text-sm font-semibold relative transition-colors ${activeTab === "preview" ? "text-primary" : "text-muted-foreground hover:text-foreground"}`}
         >
           <div className="flex items-center gap-2">
-            <BookOpenIcon className="w-4 h-4" />
+            <BookOpenIcon className="w-4 h-4" aria-hidden="true" />
             {t("common.preview", "Preview")}
           </div>
           {activeTab === "preview" && (
@@ -1020,6 +1796,7 @@ export function SkillFullDetailPage({
           )}
         </button>
         <button
+          type="button"
           onClick={() => {
             requestLeaveFileEditing(() => {
               setActiveTab("code");
@@ -1028,7 +1805,7 @@ export function SkillFullDetailPage({
           className={`py-3 text-sm font-semibold relative transition-colors ${activeTab === "code" ? "text-primary" : "text-muted-foreground hover:text-foreground"}`}
         >
           <div className="flex items-center gap-2">
-            <CodeIcon className="w-4 h-4" />
+            <CodeIcon className="w-4 h-4" aria-hidden="true" />
             {t("common.content", "Source / Content")}
           </div>
           {activeTab === "code" && (
@@ -1037,11 +1814,12 @@ export function SkillFullDetailPage({
         </button>
         {runtimeCapabilities.skillFileEditing && (
           <button
+            type="button"
             onClick={() => setActiveTab("files")}
             className={`py-3 text-sm font-semibold relative transition-colors ${activeTab === "files" ? "text-primary" : "text-muted-foreground hover:text-foreground"}`}
           >
             <div className="flex items-center gap-2">
-              <FolderOpenIcon className="w-4 h-4" />
+              <FolderOpenIcon className="w-4 h-4" aria-hidden="true" />
               {t("skill.files", "Files")}
             </div>
             {activeTab === "files" && (
@@ -1052,6 +1830,7 @@ export function SkillFullDetailPage({
 
         {/* Safety pill — compact, right-aligned in tab bar */}
         <button
+          type="button"
           onClick={() => {
             if (safetyReport && !isScanningSafety) {
               setIsSafetyModalOpen(true);
@@ -1068,13 +1847,16 @@ export function SkillFullDetailPage({
           className={`ml-auto my-auto flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-medium transition-colors disabled:opacity-50 ${safetyReport ? safetyTone : "border-border text-muted-foreground hover:border-primary/30 hover:text-primary"}`}
         >
           {isScanningSafety ? (
-            <ShieldAlertIcon className="w-3.5 h-3.5 animate-pulse" />
+            <ShieldAlertIcon
+              className="w-3.5 h-3.5 animate-pulse"
+              aria-hidden="true"
+            />
           ) : safetyReport?.level === "safe" ? (
-            <ShieldCheckIcon className="w-3.5 h-3.5" />
+            <ShieldCheckIcon className="w-3.5 h-3.5" aria-hidden="true" />
           ) : safetyReport ? (
-            <ShieldAlertIcon className="w-3.5 h-3.5" />
+            <ShieldAlertIcon className="w-3.5 h-3.5" aria-hidden="true" />
           ) : (
-            <ShieldIcon className="w-3.5 h-3.5" />
+            <ShieldIcon className="w-3.5 h-3.5" aria-hidden="true" />
           )}
           {isScanningSafety
             ? t("skill.safetyScanning", "Scanning...")
@@ -1102,22 +1884,40 @@ export function SkillFullDetailPage({
         {runtimeCapabilities.skillFileEditing && activeTab === "files" ? (
           /* Files Tab: inline file editor fills the entire content area */
           <div className="flex-1 flex flex-col app-wallpaper-panel min-h-0 overflow-hidden">
-            <SkillFileEditor
-              skillId={selectedSkill.id}
-              localPath={isProjectDetail ? selectedSkill.local_repo_path : undefined}
-              skillName={selectedSkill.name}
-              isOpen={true}
-              onSave={() => (isProjectDetail ? Promise.resolve() : loadSkills())}
-              onUnsavedChange={setFileEditorHasUnsavedChanges}
-              mode="inline"
-            />
+            <Suspense
+              fallback={
+                <div className="flex flex-1 items-center justify-center">
+                  <Spinner
+                    size="lg"
+                    tone="muted"
+                    label={t("common.loading", "Loading...")}
+                  />
+                </div>
+              }
+            >
+              <LazySkillFileEditor
+                skillId={selectedSkill.id}
+                localPath={
+                  isExternalDetail ? selectedSkill.local_repo_path : undefined
+                }
+                skillName={selectedSkill.name}
+                isOpen={true}
+                onSave={() =>
+                  isExternalDetail ? Promise.resolve() : loadSkills()
+                }
+                onUnsavedChange={setFileEditorHasUnsavedChanges}
+                mode="inline"
+              />
+            </Suspense>
           </div>
         ) : (
           <div className="max-w-6xl mx-auto p-6 w-full">
             {activeTab === "preview" ? (
               <div className="grid grid-cols-1 gap-6 lg:grid-cols-3 lg:items-stretch">
                 <SkillPreviewPane
-                  cachedInstructionsTranslation={effectiveInstructionsTranslation}
+                  cachedInstructionsTranslation={
+                    effectiveInstructionsTranslation
+                  }
                   copyStatus={copyStatus}
                   handleCopy={handleCopy}
                   handleTranslateSkill={handleTranslateSkill}
@@ -1131,8 +1931,112 @@ export function SkillFullDetailPage({
                   translationMode={translationMode}
                 />
 
-                {!isProjectDetail ? (
+                {!isExternalDetail ? (
                   <div className="space-y-6">
+                    <section className="space-y-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="flex min-w-0 items-center gap-2 text-muted-foreground">
+                          <StickyNoteIcon className="h-4 w-4 shrink-0 text-primary" />
+                          <h3 className="truncate text-xs font-semibold uppercase tracking-[0.3em]">
+                            {t("skill.userNotes", "Personal Notes")}
+                          </h3>
+                        </div>
+                        {isEditingUserNotes ? (
+                          <div className="flex items-center gap-1">
+                            <button
+                              type="button"
+                              onClick={() => void handleSaveUserNotes()}
+                              disabled={isSavingUserNotes}
+                              className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-primary transition-colors hover:bg-primary/10 disabled:opacity-50"
+                              aria-label={t("common.save", "Save")}
+                              title={t("common.save", "Save")}
+                            >
+                              {isSavingUserNotes ? (
+                                <Loader2Icon
+                                  aria-hidden="true"
+                                  className="h-4 w-4 animate-spin"
+                                />
+                              ) : (
+                                <SaveIcon
+                                  aria-hidden="true"
+                                  className="h-4 w-4"
+                                />
+                              )}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={handleCancelUserNotes}
+                              disabled={isSavingUserNotes}
+                              className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50"
+                              aria-label={t("common.cancel", "Cancel")}
+                              title={t("common.cancel", "Cancel")}
+                            >
+                              <XIcon aria-hidden="true" className="h-4 w-4" />
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => setIsEditingUserNotes(true)}
+                            disabled={isLoadingUserNotes}
+                            className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-accent hover:text-primary disabled:opacity-50"
+                            aria-label={t(
+                              "skill.editUserNotes",
+                              "Edit notes",
+                            )}
+                            title={t("skill.editUserNotes", "Edit notes")}
+                          >
+                            {isLoadingUserNotes ? (
+                              <Loader2Icon
+                                aria-hidden="true"
+                                className="h-4 w-4 animate-spin"
+                              />
+                            ) : (
+                              <PencilIcon
+                                aria-hidden="true"
+                                className="h-4 w-4"
+                              />
+                            )}
+                          </button>
+                        )}
+                      </div>
+
+                      <div
+                        data-testid="skill-user-notes-card"
+                        className="app-wallpaper-panel rounded-2xl border border-border p-4"
+                      >
+                        {isEditingUserNotes ? (
+                          <Textarea
+                            aria-label={t(
+                              "skill.userNotes",
+                              "Personal Notes",
+                            )}
+                            value={draftSkillUserNotes}
+                            onChange={(event) =>
+                              setDraftSkillUserNotes(event.target.value)
+                            }
+                            placeholder={t(
+                              "skill.userNotesPlaceholder",
+                              "Add private notes for this skill...",
+                            )}
+                            rows={5}
+                            disabled={isSavingUserNotes}
+                            className="min-h-[120px] resize-y"
+                          />
+                        ) : skillUserNotes.trim() ? (
+                          <p className="whitespace-pre-wrap break-words text-sm leading-relaxed text-foreground/85">
+                            {skillUserNotes}
+                          </p>
+                        ) : (
+                          <p className="text-sm leading-relaxed text-muted-foreground">
+                            {t(
+                              "skill.userNotesEmpty",
+                              "No personal notes yet.",
+                            )}
+                          </p>
+                        )}
+                      </div>
+                    </section>
                     <SkillPlatformPanel
                       availablePlatforms={availablePlatforms}
                       handleExport={handleExport}
@@ -1143,6 +2047,10 @@ export function SkillFullDetailPage({
                       onBatchInstall={batchInstall}
                       onCreateProject={openCreateProjectModal}
                       onDeployToProjects={handleDeployToProjects}
+                      getProjectDeployedTargets={getProjectDeployedTargets}
+                      onRemoveFromProjectTargets={
+                        requestRemoveFromProjectTargets
+                      }
                       projectDeployMode={projectDeployMode}
                       projectSkillImportPreferencesByProjectId={
                         projectSkillImportPreferencesByProjectId
@@ -1154,32 +2062,64 @@ export function SkillFullDetailPage({
                       deselectAllPlatforms={deselectAllPlatforms}
                       setInstallMode={setInstallMode}
                       setProjectDeployMode={handleSetProjectDeployMode}
-                      setProjectSkillImportPreferences={setProjectSkillImportPreferences}
+                      setProjectSkillImportPreferences={
+                        setProjectSkillImportPreferences
+                      }
                       skillMdInstallStatus={skillMdInstallStatus}
                       t={t}
                       togglePlatformSelection={togglePlatformSelection}
                       getProjectDeployTargets={getProjectDeployTargets}
-                      uninstallFromPlatform={uninstallFromPlatform}
+                      uninstallFromPlatform={requestUninstallFromPlatform}
                       uninstalledPlatforms={uninstalledPlatforms}
                     />
                   </div>
-                ) : (
+                ) : isProjectDetail ? (
                   <ProjectSkillPreviewSidebar
                     deployTargets={projectContext?.projectDeployTargets ?? []}
                     isDeploying={Boolean(projectActions?.isDeploying)}
                     isImporting={Boolean(projectActions?.isImporting)}
                     isImported={Boolean(projectContext?.importedSkill)}
                     isRemoving={Boolean(projectActions?.isRemoving)}
-                    isImportAvailable={typeof projectActions?.onImport === "function"}
-                    onAddDeployTarget={projectActions?.onAddDeployTarget ?? (() => undefined)}
-                    onDeploy={projectActions?.onDeployToProjectTargets ?? (() => undefined)}
+                    isImportAvailable={
+                      typeof projectActions?.onImport === "function"
+                    }
+                    onAddDeployTarget={
+                      projectActions?.onAddDeployTarget ?? (() => undefined)
+                    }
+                    onDeploy={
+                      projectActions?.onDeployToProjectTargets ??
+                      (() => undefined)
+                    }
                     onImport={projectActions?.onImport ?? (() => undefined)}
                     onRemoveFromProject={projectActions?.onRemoveFromProject}
                     selectedSkill={selectedSkill}
-                    sourcePath={selectedSkill.local_repo_path || selectedSkill.source_url || ""}
+                    sourcePath={
+                      selectedSkill.local_repo_path ||
+                      selectedSkill.source_url ||
+                      ""
+                    }
+                    symlinkTargetPath={
+                      projectContext?.scannedSkill?.installMode === "symlink"
+                        ? projectContext.scannedSkill.symlinkTargetPath
+                        : undefined
+                    }
                     t={t}
                   />
-                )}
+                ) : agentContext ? (
+                  <AgentSkillPreviewSidebar
+                    installMode={agentContext.installMode}
+                    isImporting={Boolean(agentActions?.isImporting)}
+                    isManaged={agentContext.isManaged}
+                    onImport={agentActions?.onImport}
+                    onOpenFolder={agentActions?.onOpenFolder}
+                    onOpenSymlinkTarget={agentActions?.onOpenSymlinkTarget}
+                    platformId={agentContext.platformId}
+                    platformName={agentContext.platformName}
+                    sourcePath={agentContext.sourcePath}
+                    symlinkTargetPath={agentContext.symlinkTargetPath}
+                    t={t}
+                  />
+                ) : null}
               </div>
             ) : (
               <SkillCodePane
@@ -1196,28 +2136,38 @@ export function SkillFullDetailPage({
 
       {showBackToTop && activeTab !== "files" && (
         <button
+          type="button"
           onClick={scrollToTop}
           className="absolute bottom-6 left-1/2 z-20 inline-flex -translate-x-1/2 items-center gap-2 rounded-full border border-border app-wallpaper-surface px-4 py-2 text-sm font-medium text-foreground shadow-lg transition-all duration-base hover:-translate-x-1/2 hover:-translate-y-0.5 hover:border-primary/30 hover:bg-accent hover:text-primary hover:shadow-xl"
         >
-          <ArrowUpIcon className="w-4 h-4" />
+          <ArrowUpIcon className="w-4 h-4" aria-hidden="true" />
           {t("common.backToTop", "Back to Top")}
         </button>
       )}
 
       {/* Edit Modal */}
-      <EditSkillModal
-        isOpen={isEditModalOpen}
-        onClose={() => setIsEditModalOpen(false)}
-        skill={selectedSkill}
-      />
+      {isEditModalOpen ? (
+        <Suspense fallback={null}>
+          <LazyEditSkillModal
+            isOpen={isEditModalOpen}
+            onClose={() => setIsEditModalOpen(false)}
+            skill={selectedSkill}
+          />
+        </Suspense>
+      ) : null}
 
       {/* Delete confirmation dialog */}
       {/* 删除确认对话框 */}
       <ConfirmDialog
         isOpen={isDeleteConfirmOpen}
-        onClose={() => setIsDeleteConfirmOpen(false)}
+        onClose={() => {
+          if (!isDeletingSkill) {
+            setIsDeleteConfirmOpen(false);
+          }
+        }}
         onConfirm={confirmDelete}
         variant="destructive"
+        isLoading={isDeletingSkill}
         title={t("skill.confirmDeleteTitle", "Confirm Delete")}
         message={
           <div className="space-y-2">
@@ -1228,14 +2178,146 @@ export function SkillFullDetailPage({
               })}
             </p>
             <p className="text-xs text-muted-foreground/80">
+              {hasDistributedInstallations
+                ? t(
+                    "skill.deleteDistributedHint",
+                    "This removes the skill from PromptHub. Source files are preserved. Distributed symlinks will be removed because they point back to PromptHub.",
+                  )
+                : t(
+                    "skill.deleteSourceOnlyHint",
+                    "Only removes this skill from the PromptHub library. Source files are preserved.",
+                  )}
+            </p>
+            {hasSymlinkInstallations ? (
+              <p className="text-xs text-destructive">
+                {t(
+                  "skill.deleteSymlinkInstallationsHint",
+                  "Symlink distributions will be deleted directly.",
+                )}
+              </p>
+            ) : null}
+            {hasCopyInstallations ? (
+              <label
+                htmlFor={deleteCopyInstallationsInputId}
+                className="flex items-start gap-2 rounded-xl border border-border bg-accent/30 p-3 text-xs"
+              >
+                <input
+                  id={deleteCopyInstallationsInputId}
+                  type="checkbox"
+                  aria-labelledby={deleteCopyInstallationsLabelId}
+                  aria-describedby={deleteCopyInstallationsHelpId}
+                  className="mt-0.5 h-4 w-4 accent-primary"
+                  checked={deleteCopyInstallations}
+                  onChange={(event) =>
+                    setDeleteCopyInstallations(event.currentTarget.checked)
+                  }
+                />
+                <span>
+                  <span
+                    id={deleteCopyInstallationsLabelId}
+                    className="block font-medium text-foreground"
+                  >
+                    {t(
+                      "skill.deleteCopyInstallationsLabel",
+                      "Also delete copied distributions",
+                    )}
+                  </span>
+                  <span
+                    id={deleteCopyInstallationsHelpId}
+                    className="mt-1 block text-muted-foreground"
+                  >
+                    {t(
+                      "skill.deleteCopyInstallationsHelp",
+                      "Leave unchecked to keep copied Agent or project folders as detached copies.",
+                    )}
+                  </span>
+                </span>
+              </label>
+            ) : null}
+          </div>
+        }
+        confirmText={t("common.delete", "Delete")}
+        cancelText={t("common.cancel", "Cancel")}
+      />
+      <ConfirmDialog
+        isOpen={pendingProjectRemoval !== null}
+        onClose={() => {
+          if (!isProjectDeploying) {
+            setPendingProjectRemoval(null);
+          }
+        }}
+        onConfirm={() => {
+          void confirmRemoveFromProjectTargets();
+        }}
+        variant="destructive"
+        isLoading={isProjectDeploying}
+        title={t("skill.confirmProjectRemoveTitle", "Remove from project")}
+        message={
+          <div className="space-y-2">
+            <p>
+              {t("skill.confirmProjectRemoveMessage", {
+                name: selectedSkill?.name || "",
+                project: pendingProjectRemoval?.project.name || "",
+                count: pendingProjectRemoval?.targets.length ?? 0,
+                defaultValue:
+                  "Remove {{name}} from {{count}} selected project folder(s) in {{project}}?",
+              })}
+            </p>
+            <p className="text-xs text-muted-foreground/80">
               {t(
-                "skill.deleteHint",
-                "Only removes from PromptHub library. Source files are preserved. Platform installations will be uninstalled.",
+                "skill.projectRemoveDistributionHint",
+                "Copied project folders are deleted from the project. Symlink project folders remove only the link.",
               )}
             </p>
           </div>
         }
-        confirmText={t("common.delete", "Delete")}
+        confirmText={t("skill.removeFromProject", "Remove from Project")}
+        cancelText={t("common.cancel", "Cancel")}
+      />
+      <ConfirmDialog
+        isOpen={pendingUninstallPlatform !== null}
+        onClose={() => {
+          if (!isUninstallingPlatform) {
+            setPendingUninstallPlatform(null);
+          }
+        }}
+        onConfirm={() => {
+          void confirmUninstallFromPlatform();
+        }}
+        variant="destructive"
+        isLoading={isUninstallingPlatform}
+        title={t("skill.confirmUninstallTitle", "Confirm Uninstall")}
+        message={
+          <div className="space-y-2">
+            <p>
+              {t(
+                "skill.confirmUninstallMessage",
+                "Are you sure you want to uninstall this skill from {{platform}}?",
+                {
+                  platform:
+                    availablePlatforms.find(
+                      (platform) => platform.id === pendingUninstallPlatform,
+                    )?.name ||
+                    pendingUninstallPlatform ||
+                    "",
+                },
+              )}
+            </p>
+            <p className="text-xs text-muted-foreground/80">
+              {skillMdInstallDetails[pendingUninstallPlatform || ""]?.mode ===
+              "symlink"
+                ? t(
+                    "skill.platformUninstallSymlinkHint",
+                    "This removes the symlink from the selected platform. The PromptHub source stays in place.",
+                  )
+                : t(
+                    "skill.platformUninstallCopyHint",
+                    "This removes the copied skill folder from the selected platform.",
+                  )}
+            </p>
+          </div>
+        }
+        confirmText={t("skill.uninstall", "Uninstall")}
         cancelText={t("common.cancel", "Cancel")}
       />
       <ConfirmDialog
@@ -1244,7 +2326,10 @@ export function SkillFullDetailPage({
         onConfirm={() => {
           void handleTranslateSkill(true);
         }}
-        title={t("skill.translationOutdatedTitle", "Saved translation is outdated")}
+        title={t(
+          "skill.translationOutdatedTitle",
+          "Saved translation is outdated",
+        )}
         message={t(
           "skill.translationOutdatedMessage",
           "This skill's SKILL.md changed after the last translation. Retranslate now?",
@@ -1292,6 +2377,10 @@ export function SkillFullDetailPage({
             {t("skill.snapshotPrompt", "Enter a note for this snapshot")}
           </div>
           <Textarea
+            aria-label={t(
+              "skill.snapshotPrompt",
+              "Enter a note for this snapshot",
+            )}
             value={snapshotNote}
             onChange={(event) => setSnapshotNote(event.target.value)}
             placeholder={t(
@@ -1319,12 +2408,15 @@ export function SkillFullDetailPage({
             >
               {isCreatingSnapshot ? (
                 <>
-                  <SaveIcon className="h-4 w-4 animate-pulse" />
+                  <SaveIcon
+                    aria-hidden="true"
+                    className="h-4 w-4 animate-pulse"
+                  />
                   {t("common.saving", "Saving")}
                 </>
               ) : (
                 <>
-                  <SaveIcon className="h-4 w-4" />
+                  <SaveIcon aria-hidden="true" className="h-4 w-4" />
                   {t("skill.createSnapshot", "Create Snapshot")}
                 </>
               )}
@@ -1638,6 +2730,7 @@ export function SkillFullDetailPage({
                 className="inline-flex items-center gap-2 rounded-xl border border-border bg-background px-4 py-2 text-sm font-medium transition-colors hover:bg-muted disabled:opacity-50"
               >
                 <RefreshCwIcon
+                  aria-hidden="true"
                   className={`h-4 w-4 ${isScanningSafety ? "animate-spin" : ""}`}
                 />
                 {isScanningSafety

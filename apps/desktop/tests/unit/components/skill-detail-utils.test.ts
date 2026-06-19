@@ -6,6 +6,7 @@ import {
   groupSkillSafetyFindings,
   resolveGitHubMarkdownBase,
   resolveGitHubMarkdownUrl,
+  resolveSkillExternalUrl,
   resolveSkillDescription,
   restoreSkillVersion,
   stripFrontmatter,
@@ -75,15 +76,21 @@ description: |
   });
 
   it("localizes skill source labels through i18n keys", () => {
-    const t = vi.fn((key: string, fallback: string) => {
+    const t = vi.fn(
+      (key: string, fallback: string, options?: Record<string, unknown>) => {
       const map: Record<string, string> = {
         "skill.sourceGithubStore": "Imported via Store",
         "skill.sourceRemoteGitRepo": "Imported from Remote Git Repository",
         "skill.sourceLocalFolder": "Imported from Local Folder",
         "skill.sourceCursorLocalFolder": "Imported from Cursor Folder",
+        "skill.sourceAgentPlatformFolder": fallback.replace(
+          "{{platform}}",
+          String(options?.platform ?? ""),
+        ),
       };
       return map[key] || fallback;
-    });
+      },
+    );
 
     const github = getSkillSourceMeta(
       {
@@ -104,11 +111,20 @@ description: |
       } as any,
       t as any,
     );
+    const cherry = getSkillSourceMeta(
+      {
+        source_url:
+          "/Users/demo/Library/Application Support/CherryStudio/Data/Skills/skill-creator",
+      } as any,
+      t as any,
+    );
 
     expect(github?.sourceLabel).toBe("Imported via Store");
-    expect(local?.sourceLabel).toBe("Imported from Cursor Folder");
+    expect(local?.sourceLabel).toBe("Imported from Cursor Agent Skills");
     expect(localSourceUrl?.kind).toBe("local");
     expect(localSourceUrl?.sourceLabel).toBe("Imported from Local Folder");
+    expect(cherry?.kind).toBe("local");
+    expect(cherry?.sourceLabel).toBe("Imported from Cherry Studio Agent Skills");
   });
 
   it("treats self-hosted git URLs as remote git repositories instead of local folders", () => {
@@ -154,6 +170,59 @@ description: |
     expect(git?.sourceLabel).toBe("Imported from Git Repository");
   });
 
+  it("uses a browser-safe repository URL for SSH git source links", () => {
+    const ssh = getSkillSourceMeta(
+      {
+        source_url: "git@github.com:owner/repo.git",
+      } as any,
+      ((key: string, fallback: string) =>
+        key === "skill.sourceGithubRepo"
+          ? "Imported from GitHub"
+          : fallback) as any,
+    );
+
+    expect(ssh).toMatchObject({
+      kind: "remote",
+      value: "https://github.com/owner/repo",
+      displayValue: "github.com:owner/repo.git",
+      sourceLabel: "Imported from GitHub",
+    });
+  });
+
+  it("does not treat unsafe explicit source protocols as remote or local sources", () => {
+    expect(
+      getSkillSourceMeta({
+        source_url: "javascript:alert(1)",
+        source_label: "github.com",
+      } as any),
+    ).toBeNull();
+    expect(
+      getSkillSourceMeta({
+        source_url: "file:///Users/demo/skills/writer",
+      } as any),
+    ).toBeNull();
+    expect(
+      getSkillSourceMeta({
+        source_url: "C:\\Users\\demo\\skills\\writer",
+      } as any),
+    ).toMatchObject({
+      kind: "local",
+      value: "C:\\Users\\demo\\skills\\writer",
+    });
+  });
+
+  it("resolves only http and https skill external URLs", () => {
+    expect(resolveSkillExternalUrl(" https://example.com/skill ")).toBe(
+      "https://example.com/skill",
+    );
+    expect(resolveSkillExternalUrl("http://example.com/skill")).toBe(
+      "http://example.com/skill",
+    );
+    expect(resolveSkillExternalUrl("javascript:alert(1)")).toBe("");
+    expect(resolveSkillExternalUrl("file:///tmp/skill")).toBe("");
+    expect(resolveSkillExternalUrl("/tmp/local-skill")).toBe("");
+  });
+
   it("resolves GitHub markdown base paths for repo subdirectories", () => {
     expect(
       resolveGitHubMarkdownBase(
@@ -176,6 +245,25 @@ description: |
     );
     expect(resolveGitHubMarkdownUrl("docs/setup.md", base, "link")).toBe(
       "https://github.com/anthropics/skills/blob/main/skills/pdf/docs/setup.md",
+    );
+  });
+
+  it("does not resolve unsafe markdown URL protocols", () => {
+    const base = resolveGitHubMarkdownBase(
+      "https://github.com/anthropics/skills/tree/main/skills/pdf",
+    );
+
+    expect(resolveGitHubMarkdownUrl("javascript:alert(1)", base, "link")).toBe(
+      "",
+    );
+    expect(resolveGitHubMarkdownUrl("file:///etc/passwd", base, "link")).toBe(
+      "",
+    );
+    expect(resolveGitHubMarkdownUrl("data:text/html,boom", base, "link")).toBe(
+      "",
+    );
+    expect(resolveGitHubMarkdownUrl("data:image/svg+xml,boom", base, "image")).toBe(
+      "",
     );
   });
 
@@ -286,5 +374,49 @@ description: |
       writable: true,
       value: originalRevokeObjectURL,
     });
+  });
+
+  it("cleans up zip export object URLs when clicking the download link fails", () => {
+    const originalCreateElement = document.createElement.bind(document);
+    Object.defineProperty(URL, "createObjectURL", {
+      configurable: true,
+      writable: true,
+      value: vi.fn(),
+    });
+    Object.defineProperty(URL, "revokeObjectURL", {
+      configurable: true,
+      writable: true,
+      value: vi.fn(),
+    });
+    const createObjectURL = vi
+      .spyOn(URL, "createObjectURL")
+      .mockReturnValue("blob:skill-zip-failure");
+    const revokeObjectURL = vi
+      .spyOn(URL, "revokeObjectURL")
+      .mockImplementation(() => {});
+    const anchor = document.createElement("a");
+    vi.spyOn(anchor, "click").mockImplementation(() => {
+      throw new Error("download blocked");
+    });
+    const appendChild = vi.spyOn(document.body, "appendChild");
+    const removeChild = vi.spyOn(document.body, "removeChild");
+    vi.spyOn(document, "createElement").mockImplementation((tagName) => {
+      if (tagName === "a") {
+        return anchor;
+      }
+      return originalCreateElement(tagName);
+    });
+
+    expect(() =>
+      downloadSkillZipExport({
+        fileName: "write.zip",
+        base64: "UEsDBA==",
+      }),
+    ).toThrow("download blocked");
+
+    expect(createObjectURL).toHaveBeenCalledTimes(1);
+    expect(appendChild).toHaveBeenCalledWith(anchor);
+    expect(removeChild).toHaveBeenCalledWith(anchor);
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:skill-zip-failure");
   });
 });

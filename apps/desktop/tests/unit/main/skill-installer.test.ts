@@ -183,9 +183,32 @@ describe("SkillInstaller.exportAsSkillMd", () => {
 });
 
 describe("SkillInstaller.fetchRemoteContent", () => {
+  function mockInstalledRemoteSources(
+    rows: Array<{ source_url: string | null; content_url: string | null }>,
+  ) {
+    const db = {
+      prepare: vi.fn(() => ({
+        all: vi.fn(() => rows),
+      })),
+    } as unknown;
+    vi.mocked(initDatabase).mockReturnValue(
+      db as ReturnType<typeof initDatabase>,
+    );
+    vi.mocked(readGithubTokenSetting).mockReturnValue(null);
+    return db;
+  }
+
+  const privateFetchOptions = {
+    allowPrivateNetwork: true,
+    allowInsecurePrivateNetworkHttp: true,
+    githubToken: null,
+  };
+
   it("reads the GitHub token without importing Electron-bound IPC modules", async () => {
     const db = { prepare: vi.fn() } as unknown;
-    vi.mocked(initDatabase).mockReturnValue(db as ReturnType<typeof initDatabase>);
+    vi.mocked(initDatabase).mockReturnValue(
+      db as ReturnType<typeof initDatabase>,
+    );
     vi.mocked(readGithubTokenSetting).mockReturnValue("ghp_FromDb");
     const fetchSpy = vi
       .spyOn(remoteInstaller, "fetchRemoteText")
@@ -201,6 +224,607 @@ describe("SkillInstaller.fetchRemoteContent", () => {
       "https://api.github.com/repos/foo/bar/contents/SKILL.md",
       0,
       { githubToken: "ghp_FromDb" },
+    );
+  });
+
+  it("allows private network fetches for installed skill content URLs", async () => {
+    mockInstalledRemoteSources([
+      {
+        source_url: "http://192.168.1.20/team/skills",
+        content_url:
+          "http://192.168.1.20/team/skills/raw/branch/main/writer/SKILL.md",
+      },
+    ]);
+    const fetchSpy = vi
+      .spyOn(remoteInstaller, "fetchRemoteText")
+      .mockResolvedValue("ok");
+
+    const result = await SkillInstaller.fetchRemoteContent(
+      "http://192.168.1.20/team/skills/raw/branch/main/writer/SKILL.md",
+    );
+
+    expect(result).toBe("ok");
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "http://192.168.1.20/team/skills/raw/branch/main/writer/SKILL.md",
+      0,
+      privateFetchOptions,
+    );
+  });
+
+  it("allows private network fetches within an installed source URL path scope", async () => {
+    mockInstalledRemoteSources([
+      {
+        source_url: "http://192.168.1.20/team/skills/",
+        content_url: null,
+      },
+    ]);
+    const fetchSpy = vi
+      .spyOn(remoteInstaller, "fetchRemoteText")
+      .mockResolvedValue("ok");
+
+    await SkillInstaller.fetchRemoteContent(
+      "http://192.168.1.20/team/skills/raw/branch/main/assets/icon.png",
+    );
+
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "http://192.168.1.20/team/skills/raw/branch/main/assets/icon.png",
+      0,
+      privateFetchOptions,
+    );
+  });
+
+  it("allows private network byte fetches within an installed source URL path scope", async () => {
+    mockInstalledRemoteSources([
+      {
+        source_url: "http://192.168.1.20/team/skills",
+        content_url: null,
+      },
+    ]);
+    const fetchSpy = vi
+      .spyOn(remoteInstaller, "fetchRemoteBytes")
+      .mockResolvedValue(new Uint8Array([1, 2, 3]));
+
+    await SkillInstaller.fetchRemoteContentBytes(
+      "http://192.168.1.20/team/skills/raw/branch/main/assets/icon.png",
+    );
+
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "http://192.168.1.20/team/skills/raw/branch/main/assets/icon.png",
+      0,
+      privateFetchOptions,
+    );
+  });
+
+  it("does not allow arbitrary private network URLs outside installed skill sources", async () => {
+    mockInstalledRemoteSources([
+      {
+        source_url: "http://192.168.1.20/team/skills",
+        content_url:
+          "http://192.168.1.20/team/skills/raw/branch/main/writer/SKILL.md",
+      },
+    ]);
+    const fetchSpy = vi
+      .spyOn(remoteInstaller, "fetchRemoteText")
+      .mockResolvedValue("ok");
+
+    await SkillInstaller.fetchRemoteContent("http://192.168.1.99/admin/config");
+
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "http://192.168.1.99/admin/config",
+      0,
+      { githubToken: null },
+    );
+  });
+
+  it("does not allow same-origin sibling paths outside the installed source URL scope", async () => {
+    mockInstalledRemoteSources([
+      {
+        source_url: "http://192.168.1.20/team/skills",
+        content_url: null,
+      },
+    ]);
+    const fetchSpy = vi
+      .spyOn(remoteInstaller, "fetchRemoteText")
+      .mockResolvedValue("ok");
+
+    await SkillInstaller.fetchRemoteContent(
+      "http://192.168.1.20/team/skills-other/raw/SKILL.md",
+    );
+
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "http://192.168.1.20/team/skills-other/raw/SKILL.md",
+      0,
+      { githubToken: null },
+    );
+  });
+
+  it("does not allow different private origins even when the path matches", async () => {
+    mockInstalledRemoteSources([
+      {
+        source_url: "http://192.168.1.20:3000/team/skills",
+        content_url: null,
+      },
+    ]);
+    const fetchSpy = vi
+      .spyOn(remoteInstaller, "fetchRemoteText")
+      .mockResolvedValue("ok");
+
+    await SkillInstaller.fetchRemoteContent(
+      "http://192.168.1.20:3001/team/skills/raw/SKILL.md",
+    );
+
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "http://192.168.1.20:3001/team/skills/raw/SKILL.md",
+      0,
+      { githubToken: null },
+    );
+  });
+
+  it("falls back to the default SSRF policy when installed source lookup fails", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const db = {
+      prepare: vi.fn(() => {
+        throw new Error("settings unavailable");
+      }),
+    } as unknown;
+    vi.mocked(initDatabase).mockReturnValue(
+      db as ReturnType<typeof initDatabase>,
+    );
+    vi.mocked(readGithubTokenSetting).mockReturnValue(null);
+    const fetchSpy = vi
+      .spyOn(remoteInstaller, "fetchRemoteText")
+      .mockResolvedValue("ok");
+
+    await SkillInstaller.fetchRemoteContent(
+      "http://192.168.1.20/team/skills/raw/SKILL.md",
+    );
+
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "http://192.168.1.20/team/skills/raw/SKILL.md",
+      0,
+      { githubToken: null },
+    );
+    expect(warnSpy).toHaveBeenCalledWith(
+      "Unable to load skill remote fetch settings, continuing unauthenticated:",
+      expect.any(Error),
+    );
+  });
+});
+
+describe("SkillInstaller.scanRemoteGithub", () => {
+  it("allows private network access for user-selected Gitea repository scans", async () => {
+    const fetchSpy = vi
+      .spyOn(SkillInstaller, "fetchRemoteContent")
+      .mockImplementation(async (url) => {
+        if (url === "https://gitea.company.test/api/v1/repos/team/skills") {
+          return JSON.stringify({ default_branch: "main" });
+        }
+        if (
+          url ===
+          "https://gitea.company.test/api/v1/repos/team/skills/git/trees/main?recursive=1"
+        ) {
+          return JSON.stringify({
+            tree: [
+              {
+                path: "tools/writer/SKILL.md",
+                type: "blob",
+                sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              },
+              {
+                path: "tools/writer/docs/guide.md",
+                type: "blob",
+                sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              },
+            ],
+          });
+        }
+        if (
+          url ===
+          "https://gitea.company.test/api/v1/repos/team/skills/raw/tools/writer/SKILL.md?ref=main"
+        ) {
+          return "---\nname: writer\ndescription: Private Gitea writer\n---\n\n# Writer\n";
+        }
+        throw new Error(`Unexpected URL: ${url}`);
+      });
+
+    const skills = await SkillInstaller.scanRemoteGithub(
+      "https://gitea.company.test/team/skills",
+      [],
+    );
+
+    expect(skills).toHaveLength(1);
+    expect(skills[0]).toEqual(
+      expect.objectContaining({
+        slug: "writer",
+        name: "writer",
+        source_branch: "main",
+        source_directory: "tools/writer",
+        canonical_skill_path: "tools/writer/SKILL.md",
+      }),
+    );
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "https://gitea.company.test/api/v1/repos/team/skills",
+      { allowPrivateNetwork: true },
+    );
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "https://gitea.company.test/api/v1/repos/team/skills/git/trees/main?recursive=1",
+      { allowPrivateNetwork: true },
+    );
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "https://gitea.company.test/api/v1/repos/team/skills/raw/tools/writer/SKILL.md?ref=main",
+      { allowPrivateNetwork: true },
+    );
+  });
+
+  it("allows direct RFC1918 IP addresses for user-selected Gitea repository scans", async () => {
+    const fetchSpy = vi
+      .spyOn(SkillInstaller, "fetchRemoteContent")
+      .mockImplementation(async (url) => {
+        if (url === "https://192.168.31.12:3000/api/v1/repos/team/skills") {
+          return JSON.stringify({ default_branch: "main" });
+        }
+        if (
+          url ===
+          "https://192.168.31.12:3000/api/v1/repos/team/skills/git/trees/main?recursive=1"
+        ) {
+          return JSON.stringify({
+            tree: [{ path: "SKILL.md", type: "blob" }],
+          });
+        }
+        if (
+          url ===
+          "https://192.168.31.12:3000/api/v1/repos/team/skills/raw/SKILL.md?ref=main"
+        ) {
+          return "---\nname: lan-gitea-skill\n---\n\n# LAN Gitea Skill\n";
+        }
+        throw new Error(`Unexpected URL: ${url}`);
+      });
+
+    const skills = await SkillInstaller.scanRemoteGithub(
+      "https://192.168.31.12:3000/team/skills",
+      [],
+    );
+
+    expect(skills).toHaveLength(1);
+    expect(skills[0]).toEqual(
+      expect.objectContaining({
+        slug: "lan-gitea-skill",
+        source_url: "https://192.168.31.12:3000/team/skills/tree/main",
+      }),
+    );
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "https://192.168.31.12:3000/api/v1/repos/team/skills",
+      { allowPrivateNetwork: true },
+    );
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "https://192.168.31.12:3000/api/v1/repos/team/skills/git/trees/main?recursive=1",
+      { allowPrivateNetwork: true },
+    );
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "https://192.168.31.12:3000/api/v1/repos/team/skills/raw/SKILL.md?ref=main",
+      { allowPrivateNetwork: true },
+    );
+  });
+
+  it("preserves HTTP for direct RFC1918 Gitea repository scans", async () => {
+    const fetchSpy = vi
+      .spyOn(SkillInstaller, "fetchRemoteContent")
+      .mockImplementation(async (url) => {
+        if (url === "http://192.168.31.12:3000/api/v1/repos/team/skills") {
+          return JSON.stringify({ default_branch: "main" });
+        }
+        if (
+          url ===
+          "http://192.168.31.12:3000/api/v1/repos/team/skills/git/trees/main?recursive=1"
+        ) {
+          return JSON.stringify({
+            tree: [{ path: "SKILL.md", type: "blob" }],
+          });
+        }
+        if (
+          url ===
+          "http://192.168.31.12:3000/api/v1/repos/team/skills/raw/SKILL.md?ref=main"
+        ) {
+          return "---\nname: lan-http-gitea-skill\n---\n\n# LAN HTTP Gitea Skill\n";
+        }
+        throw new Error(`Unexpected URL: ${url}`);
+      });
+
+    const skills = await SkillInstaller.scanRemoteGithub(
+      "http://192.168.31.12:3000/team/skills",
+      [],
+    );
+
+    expect(skills).toHaveLength(1);
+    expect(skills[0]).toEqual(
+      expect.objectContaining({
+        slug: "lan-http-gitea-skill",
+        source_url: "http://192.168.31.12:3000/team/skills/tree/main",
+      }),
+    );
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "http://192.168.31.12:3000/api/v1/repos/team/skills",
+      {
+        allowInsecurePrivateNetworkHttp: true,
+        allowPrivateNetwork: true,
+      },
+    );
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "http://192.168.31.12:3000/api/v1/repos/team/skills/git/trees/main?recursive=1",
+      {
+        allowInsecurePrivateNetworkHttp: true,
+        allowPrivateNetwork: true,
+      },
+    );
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "http://192.168.31.12:3000/api/v1/repos/team/skills/raw/SKILL.md?ref=main",
+      {
+        allowInsecurePrivateNetworkHttp: true,
+        allowPrivateNetwork: true,
+      },
+    );
+  });
+
+  it("keeps GitHub repository scans on the default public-network policy", async () => {
+    const fetchSpy = vi
+      .spyOn(SkillInstaller, "fetchRemoteContent")
+      .mockImplementation(async (url) => {
+        if (url === "https://api.github.com/repos/team/skills") {
+          return JSON.stringify({ default_branch: "main" });
+        }
+        if (
+          url ===
+          "https://api.github.com/repos/team/skills/git/trees/main?recursive=1"
+        ) {
+          return JSON.stringify({
+            tree: [{ path: "SKILL.md", type: "blob" }],
+          });
+        }
+        if (
+          url === "https://raw.githubusercontent.com/team/skills/main/SKILL.md"
+        ) {
+          return "---\nname: github-skill\n---\n\n# GitHub Skill\n";
+        }
+        throw new Error(`Unexpected URL: ${url}`);
+      });
+
+    const skills = await SkillInstaller.scanRemoteGithub(
+      "https://github.com/team/skills",
+      [],
+    );
+
+    expect(skills).toHaveLength(1);
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "https://api.github.com/repos/team/skills",
+      { allowPrivateNetwork: false },
+    );
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "https://api.github.com/repos/team/skills/git/trees/main?recursive=1",
+      { allowPrivateNetwork: false },
+    );
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "https://raw.githubusercontent.com/team/skills/main/SKILL.md",
+      { allowPrivateNetwork: false },
+    );
+  });
+});
+
+describe("SkillInstaller.scanPlatformSkills", () => {
+  it("scans real platform skill folders and distinguishes copy from symlink installs", async () => {
+    const platformSkillsDir = path.join(tmpDir, "claude", "skills");
+    const copiedSkillDir = path.join(platformSkillsDir, "copy-skill");
+    const sourceSkillDir = path.join(tmpDir, "managed", "linked-skill");
+    const linkedSkillDir = path.join(platformSkillsDir, "linked-skill");
+
+    await fs.mkdir(copiedSkillDir, { recursive: true });
+    await fs.writeFile(
+      path.join(copiedSkillDir, "SKILL.md"),
+      [
+        "---",
+        "name: copy-skill",
+        "description: Copied agent skill",
+        "tags: [agent, copy]",
+        "---",
+        "# Copy Skill",
+      ].join("\n"),
+      "utf-8",
+    );
+    await fs.writeFile(path.join(copiedSkillDir, "asset.txt"), "full package");
+
+    await fs.mkdir(sourceSkillDir, { recursive: true });
+    await fs.writeFile(
+      path.join(sourceSkillDir, "SKILL.md"),
+      [
+        "---",
+        "name: linked-skill",
+        "description: Linked agent skill",
+        "tags: [agent, symlink]",
+        "---",
+        "# Linked Skill",
+      ].join("\n"),
+      "utf-8",
+    );
+    await fs.symlink(sourceSkillDir, linkedSkillDir, "dir");
+
+    vi.spyOn(skillInstallerUtils, "getPlatformSkillsDir").mockReturnValue(
+      platformSkillsDir,
+    );
+
+    const result = await SkillInstaller.scanPlatformSkills("claude");
+    const byName = new Map(
+      result.scannedSkills.map((skill) => [skill.name, skill]),
+    );
+
+    expect(result.skillsDir).toBe(platformSkillsDir);
+    expect(byName.get("copy-skill")).toEqual(
+      expect.objectContaining({
+        installMode: "copy",
+        platformSkillPath: copiedSkillDir,
+        localPath: copiedSkillDir,
+        platforms: ["Claude Code"],
+      }),
+    );
+    expect(byName.get("linked-skill")).toEqual(
+      expect.objectContaining({
+        installMode: "symlink",
+        platformSkillPath: linkedSkillDir,
+        localPath: linkedSkillDir,
+        platforms: ["Claude Code"],
+        symlinkTargetPath: sourceSkillDir,
+      }),
+    );
+    expect(
+      await fs.readFile(path.join(copiedSkillDir, "asset.txt"), "utf-8"),
+    ).toBe("full package");
+  });
+
+  it("uninstalls only the selected platform folder and rejects paths outside the platform skills dir", async () => {
+    const platformSkillsDir = path.join(tmpDir, "claude", "skills");
+    const sourceSkillDir = path.join(tmpDir, "managed", "linked-skill");
+    const linkedSkillDir = path.join(platformSkillsDir, "linked-skill");
+    const outsideSkillDir = path.join(tmpDir, "outside-skill");
+
+    await fs.mkdir(sourceSkillDir, { recursive: true });
+    await fs.mkdir(outsideSkillDir, { recursive: true });
+    await fs.writeFile(path.join(sourceSkillDir, "SKILL.md"), "# Linked");
+    await fs.writeFile(path.join(outsideSkillDir, "SKILL.md"), "# Outside");
+    await fs.mkdir(platformSkillsDir, { recursive: true });
+    await fs.symlink(sourceSkillDir, linkedSkillDir, "dir");
+
+    vi.spyOn(skillInstallerUtils, "getPlatformSkillsDir").mockReturnValue(
+      platformSkillsDir,
+    );
+
+    await SkillInstaller.uninstallPlatformSkill("claude", linkedSkillDir);
+
+    expect(fsSync.existsSync(linkedSkillDir)).toBe(false);
+    expect(fsSync.existsSync(path.join(sourceSkillDir, "SKILL.md"))).toBe(true);
+
+    await expect(
+      SkillInstaller.uninstallPlatformSkill("claude", outsideSkillDir),
+    ).rejects.toThrow(/outside platform/);
+    expect(fsSync.existsSync(path.join(outsideSkillDir, "SKILL.md"))).toBe(
+      true,
+    );
+  });
+
+  it("uninstalls Cherry Studio scanned skills through the database-backed adapter", async () => {
+    const cherryRoot = path.join(tmpDir, "CherryStudio");
+    const cherrySkillsDir = path.join(cherryRoot, "Data", "Skills");
+    const skillDir = path.join(cherrySkillsDir, "writer");
+    const dbPath = path.join(cherryRoot, "Data", "agents.db");
+    await fs.mkdir(skillDir, { recursive: true });
+    await fs.writeFile(
+      path.join(skillDir, "SKILL.md"),
+      "---\nname: writer\n---",
+    );
+    await fs.mkdir(path.dirname(dbPath), { recursive: true });
+    const database = new Database(dbPath);
+    database.exec(`
+      CREATE TABLE skills (
+        id text PRIMARY KEY NOT NULL,
+        folder_name text NOT NULL
+      );
+      CREATE TABLE agents (
+        id text PRIMARY KEY NOT NULL,
+        accessible_paths text
+      );
+      CREATE TABLE agent_skills (
+        agent_id text NOT NULL,
+        skill_id text NOT NULL,
+        is_enabled integer DEFAULT false NOT NULL
+      );
+    `);
+    database.run(
+      "INSERT INTO skills (id, folder_name) VALUES (?, ?)",
+      "skill-1",
+      "writer",
+    );
+    database.run(
+      "INSERT INTO agent_skills (agent_id, skill_id, is_enabled) VALUES (?, ?, 0)",
+      "agent-1",
+      "skill-1",
+    );
+    database.close();
+
+    vi.spyOn(skillInstallerUtils, "getPlatformRootDir").mockReturnValue(
+      cherryRoot,
+    );
+    vi.spyOn(skillInstallerUtils, "getPlatformSkillsDir").mockReturnValue(
+      cherrySkillsDir,
+    );
+
+    await SkillInstaller.uninstallPlatformSkill("cherry-studio", skillDir);
+
+    const verifyDb = new Database(dbPath);
+    try {
+      expect(
+        verifyDb.get("SELECT id FROM skills WHERE id = ?", "skill-1"),
+      ).toBeFalsy();
+      expect(
+        verifyDb.get(
+          "SELECT skill_id FROM agent_skills WHERE skill_id = ?",
+          "skill-1",
+        ),
+      ).toBeFalsy();
+    } finally {
+      verifyDb.close();
+    }
+    expect(fsSync.existsSync(skillDir)).toBe(false);
+  });
+
+  it("marks Cherry Studio built-in scanned skills as platform built-ins", async () => {
+    const cherryRoot = path.join(tmpDir, "CherryStudio");
+    const cherrySkillsDir = path.join(cherryRoot, "Data", "Skills");
+    const skillDir = path.join(cherrySkillsDir, "find-skills");
+    const dbPath = path.join(cherryRoot, "Data", "agents.db");
+    await fs.mkdir(skillDir, { recursive: true });
+    await fs.writeFile(
+      path.join(skillDir, "SKILL.md"),
+      "---\nname: find-skills\ndescription: Built-in discovery\n---\n# Find",
+    );
+    await fs.mkdir(path.dirname(dbPath), { recursive: true });
+    const database = new Database(dbPath);
+    database.exec(`
+      CREATE TABLE skills (
+        id text PRIMARY KEY NOT NULL,
+        folder_name text NOT NULL,
+        source text NOT NULL
+      );
+      CREATE TABLE agents (
+        id text PRIMARY KEY NOT NULL,
+        accessible_paths text
+      );
+      CREATE TABLE agent_skills (
+        agent_id text NOT NULL,
+        skill_id text NOT NULL,
+        is_enabled integer DEFAULT false NOT NULL
+      );
+    `);
+    database.run(
+      "INSERT INTO skills (id, folder_name, source) VALUES (?, ?, ?)",
+      "skill-1",
+      "find-skills",
+      "builtin",
+    );
+    database.close();
+
+    vi.spyOn(skillInstallerUtils, "getPlatformRootDir").mockReturnValue(
+      cherryRoot,
+    );
+    vi.spyOn(skillInstallerUtils, "getPlatformSkillsDir").mockReturnValue(
+      cherrySkillsDir,
+    );
+
+    const result = await SkillInstaller.scanPlatformSkills("cherry-studio");
+
+    expect(result.scannedSkills).toHaveLength(1);
+    expect(result.scannedSkills[0]).toEqual(
+      expect.objectContaining({
+        name: "find-skills",
+        isPlatformBuiltin: true,
+        platformSkillPath: skillDir,
+      }),
     );
   });
 });
@@ -289,30 +913,47 @@ describe("SkillInstaller.getSupportedPlatforms", () => {
       expect(typeof p.rootDir.win32).toBe("string");
       expect(typeof p.rootDir.linux).toBe("string");
       expect(typeof p.skillsRelativePath).toBe("string");
-}
-});
+    }
+  });
 });
 
 describe("SkillInstaller.scanRemoteGithub", () => {
-  it("accepts HTTPS Gitea URLs (not just SSH)", async () => {
+  it("accepts HTTPS Gitea URLs without cloning the repository", async () => {
     await SkillInstaller.init();
 
-    vi.spyOn(skillInstallerUtils, "gitClone").mockResolvedValue(undefined);
-    vi.spyOn(SkillInstaller, "scanLocalPreview").mockResolvedValue([
-      {
-        name: "gitea-skill",
-        description: "A skill from Gitea",
-        version: "1.0.0",
-        author: "icelemon",
-        tags: ["gitea"],
-        instructions: "# Gitea skill\n\nContent",
-        directory_fingerprint: "gitea-fingerprint",
-        filePath: "/tmp/gitea-skill/SKILL.md",
-        localPath: "/tmp/gitea-skill",
-        platforms: ["claude"],
-        protocol_type: "skill",
+    const cloneSpy = vi.spyOn(skillInstallerUtils, "gitClone");
+    vi.spyOn(SkillInstaller, "fetchRemoteContent").mockImplementation(
+      async (url: string) => {
+        if (url === "https://gitea.example.com/api/v1/repos/icelemon/skills") {
+          return JSON.stringify({ default_branch: "main" });
+        }
+        if (
+          url ===
+          "https://gitea.example.com/api/v1/repos/icelemon/skills/git/trees/main?recursive=1"
+        ) {
+          return JSON.stringify({
+            tree: [
+              { path: "gitea-skill/SKILL.md", type: "blob", sha: "skill-sha" },
+            ],
+          });
+        }
+        if (
+          url ===
+          "https://gitea.example.com/api/v1/repos/icelemon/skills/raw/gitea-skill/SKILL.md?ref=main"
+        ) {
+          return [
+            "---",
+            "name: gitea-skill",
+            "description: A skill from Gitea",
+            "author: icelemon",
+            "tags: [gitea]",
+            "---",
+            "# Gitea skill",
+          ].join("\n");
+        }
+        throw new Error(`Unexpected URL: ${url}`);
       },
-    ]);
+    );
 
     const result = await SkillInstaller.scanRemoteGithub(
       "https://gitea.example.com/icelemon/skills",
@@ -322,29 +963,48 @@ describe("SkillInstaller.scanRemoteGithub", () => {
     expect(result).toHaveLength(1);
     expect(result[0].slug).toBe("gitea-skill");
     expect(result[0].author).toBe("icelemon");
-    expect(result[0].directory_fingerprint).toBe("gitea-fingerprint");
-    expect(skillInstallerUtils.gitClone).toHaveBeenCalled();
+    expect(result[0].content_url).toBe(
+      "https://gitea.example.com/api/v1/repos/icelemon/skills/raw/gitea-skill/SKILL.md?ref=main",
+    );
+    expect(cloneSpy).not.toHaveBeenCalled();
   });
 
-  it("accepts SSH Gitea URLs", async () => {
+  it("accepts SSH Gitea URLs without cloning the repository", async () => {
     await SkillInstaller.init();
 
-    vi.spyOn(skillInstallerUtils, "gitClone").mockResolvedValue(undefined);
-    vi.spyOn(SkillInstaller, "scanLocalPreview").mockResolvedValue([
-      {
-        name: "ssh-skill",
-        description: "SSH skill",
-        version: "1.0.0",
-        author: "owner",
-        tags: ["ssh"],
-        instructions: "# SSH skill",
-        directory_fingerprint: "ssh-fingerprint",
-        filePath: "/tmp/ssh-skill/SKILL.md",
-        localPath: "/tmp/ssh-skill",
-        platforms: ["claude"],
-        protocol_type: "skill",
+    const cloneSpy = vi.spyOn(skillInstallerUtils, "gitClone");
+    vi.spyOn(SkillInstaller, "fetchRemoteContent").mockImplementation(
+      async (url: string) => {
+        if (url === "https://gitea.example.com/api/v1/repos/icelemon/skills") {
+          return JSON.stringify({ default_branch: "main" });
+        }
+        if (
+          url ===
+          "https://gitea.example.com/api/v1/repos/icelemon/skills/git/trees/main?recursive=1"
+        ) {
+          return JSON.stringify({
+            tree: [
+              { path: "ssh-skill/SKILL.md", type: "blob", sha: "ssh-sha" },
+            ],
+          });
+        }
+        if (
+          url ===
+          "https://gitea.example.com/api/v1/repos/icelemon/skills/raw/ssh-skill/SKILL.md?ref=main"
+        ) {
+          return [
+            "---",
+            "name: ssh-skill",
+            "description: SSH skill",
+            "author: owner",
+            "tags: [ssh]",
+            "---",
+            "# SSH skill",
+          ].join("\n");
+        }
+        throw new Error(`Unexpected URL: ${url}`);
       },
-    ]);
+    );
 
     const result = await SkillInstaller.scanRemoteGithub(
       "git@gitea.example.com:icelemon/skills.git",
@@ -353,7 +1013,58 @@ describe("SkillInstaller.scanRemoteGithub", () => {
 
     expect(result).toHaveLength(1);
     expect(result[0].slug).toBe("ssh-skill");
-    expect(result[0].directory_fingerprint).toBe("ssh-fingerprint");
+    expect(result[0].content_url).toBe(
+      "https://gitea.example.com/api/v1/repos/icelemon/skills/raw/ssh-skill/SKILL.md?ref=main",
+    );
+    expect(cloneSpy).not.toHaveBeenCalled();
+  });
+
+  it("scans SSH GitHub store URLs by cloning through the local SSH transport", async () => {
+    await SkillInstaller.init();
+
+    const cloneSpy = vi.spyOn(skillInstallerUtils, "gitClone");
+    const branchSpy = vi
+      .spyOn(skillInstallerUtils, "gitGetCurrentBranch")
+      .mockResolvedValue("main");
+    const fetchSpy = vi.spyOn(SkillInstaller, "fetchRemoteContent");
+    cloneSpy.mockImplementation(async (_url: string, destDir: string) => {
+      const skillDir = path.join(destDir, "github-skill");
+      await fs.mkdir(skillDir, { recursive: true });
+      await fs.writeFile(
+        path.join(skillDir, "SKILL.md"),
+        [
+          "---",
+          "name: github-skill",
+          "description: GitHub SSH skill",
+          "author: icelemon",
+          "tags: [github]",
+          "---",
+          "# GitHub skill",
+        ].join("\n"),
+        "utf-8",
+      );
+      await fs.writeFile(path.join(skillDir, "README.md"), "docs", "utf-8");
+    });
+
+    const result = await SkillInstaller.scanRemoteGithub(
+      "git@github.com:icelemon/skills.git",
+      [],
+    );
+
+    expect(result).toHaveLength(1);
+    expect(cloneSpy).toHaveBeenCalledWith(
+      "git@github.com:icelemon/skills.git",
+      expect.stringContaining("icelemon-skills"),
+      undefined,
+    );
+    expect(branchSpy).toHaveBeenCalled();
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(result[0].source_url).toBe(
+      "https://github.com/icelemon/skills/tree/main/github-skill",
+    );
+    expect(result[0].content_url).toBe(
+      "https://raw.githubusercontent.com/icelemon/skills/main/github-skill/SKILL.md",
+    );
   });
 
   it("rejects invalid git repository URLs", async () => {
@@ -362,7 +1073,7 @@ describe("SkillInstaller.scanRemoteGithub", () => {
     await expect(
       SkillInstaller.scanRemoteGithub("not-a-url", []),
     ).rejects.toThrow("Invalid git repository URL");
-});
+  });
 });
 
 describe("SkillInstaller.copyRepoByPathToDirectory", () => {
@@ -371,7 +1082,11 @@ describe("SkillInstaller.copyRepoByPathToDirectory", () => {
     const targetRootDir = path.join(tmpDir, "project", ".agents", "skills");
     await fs.mkdir(path.join(sourceDir, "docs"), { recursive: true });
     await fs.writeFile(path.join(sourceDir, "SKILL.md"), "# demo", "utf-8");
-    await fs.writeFile(path.join(sourceDir, "docs", "guide.md"), "guide", "utf-8");
+    await fs.writeFile(
+      path.join(sourceDir, "docs", "guide.md"),
+      "guide",
+      "utf-8",
+    );
 
     const targetDir = await SkillInstaller.copyRepoByPathToDirectory(
       sourceDir,
@@ -380,17 +1095,69 @@ describe("SkillInstaller.copyRepoByPathToDirectory", () => {
     );
 
     expect(targetDir).toBe(path.join(targetRootDir, "demo-skill"));
-    await expect(fs.readFile(path.join(targetDir, "SKILL.md"), "utf-8")).resolves.toBe(
-      "# demo",
-    );
+    await expect(
+      fs.readFile(path.join(targetDir, "SKILL.md"), "utf-8"),
+    ).resolves.toBe("# demo");
     await expect(
       fs.readFile(path.join(targetDir, "docs", "guide.md"), "utf-8"),
     ).resolves.toBe("guide");
   });
 
+  it("copy mode dereferences a symlinked source directory", async () => {
+    const realSourceDir = path.join(tmpDir, "real-source-skill");
+    const linkedSourceDir = path.join(tmpDir, "linked-source-skill");
+    const targetRootDir = path.join(
+      tmpDir,
+      "project-linked-copy",
+      ".agents",
+      "skills",
+    );
+    await fs.mkdir(path.join(realSourceDir, "assets"), { recursive: true });
+    await fs.writeFile(
+      path.join(realSourceDir, "SKILL.md"),
+      "# real source",
+      "utf-8",
+    );
+    await fs.writeFile(
+      path.join(realSourceDir, "assets", "note.txt"),
+      "asset",
+      "utf-8",
+    );
+    await fs.symlink(realSourceDir, linkedSourceDir, "dir");
+
+    const targetDir = await SkillInstaller.copyRepoByPathToDirectory(
+      linkedSourceDir,
+      "demo-skill",
+      targetRootDir,
+      { mode: "copy" },
+    );
+
+    expect((await fs.lstat(targetDir)).isSymbolicLink()).toBe(false);
+    await expect(
+      fs.readFile(path.join(targetDir, "SKILL.md"), "utf-8"),
+    ).resolves.toBe("# real source");
+    await expect(
+      fs.readFile(path.join(targetDir, "assets", "note.txt"), "utf-8"),
+    ).resolves.toBe("asset");
+
+    await fs.writeFile(
+      path.join(realSourceDir, "SKILL.md"),
+      "# changed source",
+      "utf-8",
+    );
+    await expect(
+      fs.readFile(path.join(targetDir, "SKILL.md"), "utf-8"),
+    ).resolves.toBe("# real source");
+  });
+
   it("skips an existing project target when requested", async () => {
     const sourceDir = path.join(tmpDir, "source-skill-skip");
-    const targetRootDir = path.join(tmpDir, "project-skip", ".agents", "skills");
+    const targetRootDir = path.join(
+      tmpDir,
+      "project-skip",
+      ".agents",
+      "skills",
+    );
     const targetDir = path.join(targetRootDir, "demo-skill");
     await fs.mkdir(sourceDir, { recursive: true });
     await fs.mkdir(targetDir, { recursive: true });
@@ -405,16 +1172,25 @@ describe("SkillInstaller.copyRepoByPathToDirectory", () => {
     );
 
     expect(result).toBe(targetDir);
-    await expect(fs.readFile(path.join(targetDir, "SKILL.md"), "utf-8")).resolves.toBe(
-      "# existing",
-    );
+    await expect(
+      fs.readFile(path.join(targetDir, "SKILL.md"), "utf-8"),
+    ).resolves.toBe("# existing");
   });
 
   it("supports symlink mode when importing a skill into a project target", async () => {
     const sourceDir = path.join(tmpDir, "source-skill-symlink");
-    const targetRootDir = path.join(tmpDir, "project-symlink", ".agents", "skills");
+    const targetRootDir = path.join(
+      tmpDir,
+      "project-symlink",
+      ".agents",
+      "skills",
+    );
     await fs.mkdir(sourceDir, { recursive: true });
-    await fs.writeFile(path.join(sourceDir, "SKILL.md"), "# symlinked", "utf-8");
+    await fs.writeFile(
+      path.join(sourceDir, "SKILL.md"),
+      "# symlinked",
+      "utf-8",
+    );
 
     const targetDir = await SkillInstaller.copyRepoByPathToDirectory(
       sourceDir,
@@ -424,10 +1200,100 @@ describe("SkillInstaller.copyRepoByPathToDirectory", () => {
     );
 
     expect(targetDir).toBe(path.join(targetRootDir, "demo-skill"));
-    await expect(fs.lstat(targetDir)).resolves.toMatchObject({ isSymbolicLink: expect.any(Function) });
-    await expect(fs.readFile(path.join(targetDir, "SKILL.md"), "utf-8")).resolves.toBe(
-      "# symlinked",
+    await expect(fs.lstat(targetDir)).resolves.toMatchObject({
+      isSymbolicLink: expect.any(Function),
+    });
+    await expect(
+      fs.readFile(path.join(targetDir, "SKILL.md"), "utf-8"),
+    ).resolves.toBe("# symlinked");
+  });
+
+  it("reads source updates when scanning a symlink project skill", async () => {
+    await SkillInstaller.init();
+
+    const sourceDir = path.join(tmpDir, "source-skill-symlink-live");
+    const targetRootDir = path.join(
+      tmpDir,
+      "project-symlink-live",
+      ".agents",
+      "skills",
     );
+    await fs.mkdir(sourceDir, { recursive: true });
+    await fs.writeFile(
+      path.join(sourceDir, "SKILL.md"),
+      [
+        "---",
+        "name: demo-skill",
+        "description: Before edit",
+        "---",
+        "",
+        "# Before",
+      ].join("\n"),
+      "utf-8",
+    );
+
+    const targetDir = await SkillInstaller.copyRepoByPathToDirectory(
+      sourceDir,
+      "demo-skill",
+      targetRootDir,
+      { mode: "symlink" },
+    );
+
+    await fs.writeFile(
+      path.join(sourceDir, "SKILL.md"),
+      [
+        "---",
+        "name: demo-skill",
+        "description: After external edit",
+        "---",
+        "",
+        "# After",
+      ].join("\n"),
+      "utf-8",
+    );
+
+    const results = await SkillInstaller.scanLocalPreview([targetRootDir]);
+
+    expect(results).toHaveLength(1);
+    expect(results[0]).toEqual(
+      expect.objectContaining({
+        description: "After external edit",
+        filePath: path.join(targetDir, "SKILL.md"),
+        instructions: expect.stringContaining("# After"),
+        localPath: targetDir,
+      }),
+    );
+  });
+
+  it("removes only the project symlink when uninstalling a symlink project skill", async () => {
+    const sourceDir = path.join(tmpDir, "source-skill-symlink-remove");
+    const targetRootDir = path.join(
+      tmpDir,
+      "project-symlink-remove",
+      ".agents",
+      "skills",
+    );
+    await fs.mkdir(sourceDir, { recursive: true });
+    await fs.writeFile(
+      path.join(sourceDir, "SKILL.md"),
+      "# keep source",
+      "utf-8",
+    );
+
+    const targetDir = await SkillInstaller.copyRepoByPathToDirectory(
+      sourceDir,
+      "demo-skill",
+      targetRootDir,
+      { mode: "symlink" },
+    );
+    expect((await fs.lstat(targetDir)).isSymbolicLink()).toBe(true);
+
+    await SkillInstaller.deleteLocalRepoFileByPath(targetDir, ".");
+
+    await expect(fs.lstat(targetDir)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(
+      fs.readFile(path.join(sourceDir, "SKILL.md"), "utf-8"),
+    ).resolves.toBe("# keep source");
   });
 
   it("rejects project targets nested inside the source skill directory", async () => {
@@ -442,11 +1308,19 @@ describe("SkillInstaller.copyRepoByPathToDirectory", () => {
         "demo-skill",
         nestedTargetRootDir,
       ),
-    ).rejects.toThrow(/Target directory must not be inside the source skill directory/);
+    ).rejects.toThrow(
+      /Target directory must not be inside the source skill directory/,
+    );
   });
 
   it("rejects copying a skill back onto the same target skill directory", async () => {
-    const sourceDir = path.join(tmpDir, "project", ".agents", "skills", "demo-skill");
+    const sourceDir = path.join(
+      tmpDir,
+      "project",
+      ".agents",
+      "skills",
+      "demo-skill",
+    );
     const targetRootDir = path.join(tmpDir, "project", ".agents", "skills");
     await fs.mkdir(sourceDir, { recursive: true });
     await fs.writeFile(path.join(sourceDir, "SKILL.md"), "# demo", "utf-8");
@@ -457,7 +1331,9 @@ describe("SkillInstaller.copyRepoByPathToDirectory", () => {
         "demo-skill",
         targetRootDir,
       ),
-    ).rejects.toThrow(/Target skill directory must not equal the source skill directory/);
+    ).rejects.toThrow(
+      /Target skill directory must not equal the source skill directory/,
+    );
   });
 });
 
@@ -526,6 +1402,113 @@ describe("SkillInstaller.init", () => {
     await SkillInstaller.init();
     // Call again — should not throw
     await expect(SkillInstaller.init()).resolves.toBeUndefined();
+  });
+});
+
+describe("SkillInstaller.saveToLocalRepo", () => {
+  it("copy mode dereferences a symlinked source directory", async () => {
+    const realSourceDir = path.join(tmpDir, "real-library-source");
+    const linkedSourceDir = path.join(tmpDir, "linked-library-source");
+    await fs.mkdir(path.join(realSourceDir, "assets"), { recursive: true });
+    await fs.writeFile(
+      path.join(realSourceDir, "SKILL.md"),
+      "# library source",
+      "utf-8",
+    );
+    await fs.writeFile(
+      path.join(realSourceDir, "assets", "example.txt"),
+      "example",
+      "utf-8",
+    );
+    await fs.symlink(realSourceDir, linkedSourceDir, "dir");
+
+    const repoDir = await SkillInstaller.saveToLocalRepo(
+      "library-copy",
+      linkedSourceDir,
+      "copy",
+    );
+
+    expect((await fs.lstat(repoDir)).isSymbolicLink()).toBe(false);
+    await expect(
+      fs.readFile(path.join(repoDir, "SKILL.md"), "utf-8"),
+    ).resolves.toBe("# library source");
+    await expect(
+      fs.readFile(path.join(repoDir, "assets", "example.txt"), "utf-8"),
+    ).resolves.toBe("example");
+
+    await fs.writeFile(
+      path.join(realSourceDir, "SKILL.md"),
+      "# changed library source",
+      "utf-8",
+    );
+    await expect(
+      fs.readFile(path.join(repoDir, "SKILL.md"), "utf-8"),
+    ).resolves.toBe("# library source");
+  });
+
+  it("materializes requested symlink mode inside data Skills", async () => {
+    const realSourceDir = path.join(tmpDir, "real-library-symlink-request");
+    await fs.mkdir(realSourceDir, { recursive: true });
+    await fs.writeFile(
+      path.join(realSourceDir, "SKILL.md"),
+      "# symlink request source",
+      "utf-8",
+    );
+
+    const repoDir = await SkillInstaller.saveToLocalRepo(
+      "library-symlink-request",
+      realSourceDir,
+      "symlink",
+    );
+
+    expect((await fs.lstat(repoDir)).isSymbolicLink()).toBe(false);
+    await expect(
+      fs.readFile(path.join(repoDir, "SKILL.md"), "utf-8"),
+    ).resolves.toBe("# symlink request source");
+
+    await fs.writeFile(
+      path.join(realSourceDir, "SKILL.md"),
+      "# changed after import",
+      "utf-8",
+    );
+    await expect(
+      fs.readFile(path.join(repoDir, "SKILL.md"), "utf-8"),
+    ).resolves.toBe("# symlink request source");
+  });
+
+  it("materializes legacy managed repo symlinks in place", async () => {
+    const externalSourceDir = path.join(tmpDir, "external-legacy-source");
+    const managedRepoDir = path.join(
+      managedSkillsDir(),
+      "legacy-linked",
+      "repo",
+    );
+    await fs.mkdir(externalSourceDir, { recursive: true });
+    await fs.mkdir(path.dirname(managedRepoDir), { recursive: true });
+    await fs.writeFile(
+      path.join(externalSourceDir, "SKILL.md"),
+      "# legacy linked source",
+      "utf-8",
+    );
+    await fs.symlink(externalSourceDir, managedRepoDir, "dir");
+
+    await expect(
+      SkillInstaller.materializeManagedRepoSymlink(managedRepoDir),
+    ).resolves.toBe(true);
+
+    expect((await fs.lstat(managedRepoDir)).isSymbolicLink()).toBe(false);
+    await expect(
+      fs.readFile(path.join(managedRepoDir, "SKILL.md"), "utf-8"),
+    ).resolves.toBe("# legacy linked source");
+
+    await fs.writeFile(
+      path.join(externalSourceDir, "SKILL.md"),
+      "# changed legacy source",
+      "utf-8",
+    );
+    await expect(
+      fs.readFile(path.join(managedRepoDir, "SKILL.md"), "utf-8"),
+    ).resolves.toBe("# legacy linked source");
   });
 });
 
@@ -682,9 +1665,7 @@ describe("SkillInstaller.readLocalRepoFiles", () => {
     expect(skillMd?.isDirectory).toBe(false);
 
     // Check nested file
-    const utilsFile = files.find(
-      (f) => f.path === path.join("lib", "utils.ts"),
-    );
+    const utilsFile = files.find((f) => f.path === "lib/utils.ts");
     expect(utilsFile?.content).toBe("export const x = 1;");
   });
 
@@ -722,6 +1703,58 @@ describe("SkillInstaller.readLocalRepoFileBuffersByPath", () => {
 });
 
 describe("SkillInstaller external repo by-path access", () => {
+  const previewCases: Array<{
+    relativePath: string;
+    mimeType: string;
+    previewKind: "image" | "audio" | "video" | "pdf";
+  }> = [
+    {
+      relativePath: "assets/logo.svg",
+      mimeType: "image/svg+xml",
+      previewKind: "image",
+    },
+    {
+      relativePath: "assets/logo.png",
+      mimeType: "image/png",
+      previewKind: "image",
+    },
+    {
+      relativePath: "assets/photo.jpg",
+      mimeType: "image/jpeg",
+      previewKind: "image",
+    },
+    {
+      relativePath: "assets/cover.webp",
+      mimeType: "image/webp",
+      previewKind: "image",
+    },
+    {
+      relativePath: "media/intro.mp3",
+      mimeType: "audio/mpeg",
+      previewKind: "audio",
+    },
+    {
+      relativePath: "media/intro.wav",
+      mimeType: "audio/wav",
+      previewKind: "audio",
+    },
+    {
+      relativePath: "media/demo.mp4",
+      mimeType: "video/mp4",
+      previewKind: "video",
+    },
+    {
+      relativePath: "media/demo.webm",
+      mimeType: "video/webm",
+      previewKind: "video",
+    },
+    {
+      relativePath: "docs/manual.pdf",
+      mimeType: "application/pdf",
+      previewKind: "pdf",
+    },
+  ];
+
   it("lists and edits files under an external project skill root", async () => {
     const repoPath = path.join(tmpDir, "project", ".claude", "skills", "novel");
     await fs.mkdir(repoPath, { recursive: true });
@@ -768,10 +1801,19 @@ describe("SkillInstaller external repo by-path access", () => {
   });
 
   it("accepts a SKILL.md file path as the by-path repo base", async () => {
-    const repoPath = path.join(tmpDir, "project", ".claude", "skills", "novel-file-base");
+    const repoPath = path.join(
+      tmpDir,
+      "project",
+      ".claude",
+      "skills",
+      "novel-file-base",
+    );
     const skillMdPath = path.join(repoPath, "SKILL.md");
     await fs.mkdir(repoPath, { recursive: true });
-    await fs.writeFile(skillMdPath, "---\nname: novel-file-base\n---\n# Novel File Base\n");
+    await fs.writeFile(
+      skillMdPath,
+      "---\nname: novel-file-base\n---\n# Novel File Base\n",
+    );
 
     const files = await SkillInstaller.listLocalRepoFilesByPath(skillMdPath);
     expect(files).toEqual(
@@ -796,6 +1838,74 @@ describe("SkillInstaller external repo by-path access", () => {
       "notes.txt",
     );
     expect(note?.content).toBe("hello file-base skill");
+  });
+
+  it("returns preview data URLs for supported resource files without changing bulk reads", async () => {
+    const repoPath = path.join(
+      tmpDir,
+      "project",
+      ".claude",
+      "skills",
+      "asset-skill",
+    );
+    await fs.mkdir(repoPath, { recursive: true });
+    await fs.writeFile(path.join(repoPath, "SKILL.md"), "# Asset Skill\n");
+    for (const testCase of previewCases) {
+      const fullPath = path.join(repoPath, testCase.relativePath);
+      await fs.mkdir(path.dirname(fullPath), { recursive: true });
+      await fs.writeFile(fullPath, Buffer.from([1, 2, 3, 4]));
+    }
+
+    const all = await SkillInstaller.readLocalRepoFilesByPath(repoPath);
+    for (const testCase of previewCases) {
+      const single = await SkillInstaller.readLocalRepoFileByPath(
+        repoPath,
+        testCase.relativePath,
+      );
+      const bulkFile = all.find((file) => file.path === testCase.relativePath);
+
+      expect(single?.encoding).toBe("data-url");
+      expect(single?.mimeType).toBe(testCase.mimeType);
+      expect(single?.previewKind).toBe(testCase.previewKind);
+      expect(single?.content).toMatch(
+        new RegExp(`^data:${testCase.mimeType.replace("+", "\\+")};base64,`),
+      );
+      expect(bulkFile?.content).toBe("[binary file]");
+      expect(bulkFile?.encoding).toBe("placeholder");
+    }
+  });
+
+  it("keeps unsupported and oversized binary files as non-editable placeholders", async () => {
+    const repoPath = path.join(tmpDir, "project", "skills", "binary-skill");
+    await fs.mkdir(path.join(repoPath, "assets"), { recursive: true });
+    await fs.writeFile(path.join(repoPath, "SKILL.md"), "# Binary Skill\n");
+    await fs.writeFile(path.join(repoPath, "assets", "archive.zip"), "zip");
+    await fs.writeFile(
+      path.join(repoPath, "assets", "huge.png"),
+      Buffer.alloc(5 * 1_048_576 + 1),
+    );
+
+    const unsupported = await SkillInstaller.readLocalRepoFileByPath(
+      repoPath,
+      "assets/archive.zip",
+    );
+    const oversized = await SkillInstaller.readLocalRepoFileByPath(
+      repoPath,
+      "assets/huge.png",
+    );
+
+    expect(unsupported).toMatchObject({
+      content: "[binary file]",
+      encoding: "placeholder",
+    });
+    expect(unsupported?.mimeType).toBeUndefined();
+    expect(unsupported?.previewKind).toBeUndefined();
+    expect(oversized).toMatchObject({
+      content: "[file too large]",
+      encoding: "placeholder",
+      mimeType: "image/png",
+      previewKind: "image",
+    });
   });
 
   it("still rejects traversal outside an external project skill root", async () => {
@@ -1412,7 +2522,10 @@ describe("SkillInstaller.scanLocalPreview", () => {
   it("without customPaths scans default platform directories", async () => {
     await SkillInstaller.init();
 
-    const isolatedDefaultPlatformDir = path.join(tmpDir, "isolated-platform-skills");
+    const isolatedDefaultPlatformDir = path.join(
+      tmpDir,
+      "isolated-platform-skills",
+    );
     const getMock = vi.fn().mockReturnValue({
       value: JSON.stringify(
         Object.fromEntries(
@@ -1484,6 +2597,50 @@ describe("SkillInstaller.scanLocalPreview", () => {
     expect(results).toHaveLength(1);
     expect(results[0].name).toBe("direct-skill");
     expect(results[0].localPath).toBe(dir);
+  });
+
+  it("discovers project skills installed as symlink directories", async () => {
+    await SkillInstaller.init();
+
+    const sourceDir = path.join(tmpDir, "prompthub-source", "writer");
+    const projectSkillRoot = path.join(
+      tmpDir,
+      "workspace",
+      ".agents",
+      "skills",
+    );
+    const projectSkillPath = path.join(projectSkillRoot, "writer");
+    await fs.mkdir(sourceDir, { recursive: true });
+    await fs.mkdir(projectSkillRoot, { recursive: true });
+    await fs.writeFile(
+      path.join(sourceDir, "SKILL.md"),
+      [
+        "---",
+        "name: writer",
+        "description: Project symlink skill",
+        "---",
+        "",
+        "# Writer",
+      ].join("\n"),
+      "utf-8",
+    );
+    await fs.symlink(sourceDir, projectSkillPath, "dir");
+
+    const results = await SkillInstaller.scanLocalPreview([projectSkillRoot]);
+
+    expect(results).toHaveLength(1);
+    expect(results[0]).toEqual(
+      expect.objectContaining({
+        name: "writer",
+        description: "Project symlink skill",
+        filePath: path.join(projectSkillPath, "SKILL.md"),
+        installMode: "symlink",
+        isPromptHubManagedLink: false,
+        localPath: projectSkillPath,
+        platforms: ["Custom"],
+        symlinkTargetPath: sourceDir,
+      }),
+    );
   });
 
   it("returns empty array for non-existent customPath", async () => {
@@ -1901,10 +3058,7 @@ describe("SkillInstaller.installFromGithub", () => {
     // Need a real SkillDB for the DB check, but URL validation comes first
     const mockDb = { getByName: vi.fn() } as unknown as SkillDB;
     await expect(
-      SkillInstaller.installFromGithub(
-        "https://evil.com/owner/",
-        mockDb,
-      ),
+      SkillInstaller.installFromGithub("https://evil.com/owner/", mockDb),
     ).rejects.toThrow("Invalid git repository URL");
   });
 
@@ -1917,9 +3071,11 @@ describe("SkillInstaller.installFromGithub", () => {
       update: vi.fn(),
     } as unknown as SkillDB;
 
-    vi.spyOn(skillInstallerUtils, "gitClone").mockImplementation(async (_url, destDir) => {
-      await fs.mkdir(destDir, { recursive: true });
-    });
+    vi.spyOn(skillInstallerUtils, "gitClone").mockImplementation(
+      async (_url, destDir) => {
+        await fs.mkdir(destDir, { recursive: true });
+      },
+    );
     vi.spyOn(SkillInstaller, "resolveSingleSkillDirFromRepo").mockResolvedValue(
       path.join(managedSkillsDir(), "icelemon-skills"),
     );
@@ -1942,6 +3098,100 @@ describe("SkillInstaller.installFromGithub", () => {
       "https://gitea.example.com/icelemon/skills",
       path.join(managedSkillsDir(), "icelemon-skills"),
     );
+  });
+
+  it("removes the temporary clone after moving a GitHub install into the managed repo", async () => {
+    await SkillInstaller.init();
+
+    const dbMock = {
+      getByName: vi.fn().mockReturnValue(null),
+      create: vi.fn().mockReturnValue({
+        id: "skill-cleanup",
+        name: "repo",
+        source_id: "source-repo-main",
+        local_repo_path: path.join(managedSkillsDir(), "owner-repo"),
+      }),
+      update: vi.fn(),
+      delete: vi.fn(),
+    };
+    const mockDb = dbMock as unknown as SkillDB;
+
+    vi.spyOn(skillInstallerUtils, "gitClone").mockImplementation(
+      async (_url, destDir) => {
+        await fs.mkdir(path.join(destDir, "docs"), { recursive: true });
+        await fs.writeFile(path.join(destDir, "SKILL.md"), "# Repo\n");
+        await fs.writeFile(path.join(destDir, "docs", "guide.md"), "Guide");
+      },
+    );
+    vi.spyOn(SkillInstaller, "resolveSingleSkillDirFromRepo").mockImplementation(
+      async (installDir) => installDir,
+    );
+    vi.spyOn(SkillInstaller, "readManifest").mockResolvedValue({
+      name: "repo",
+      description: "Repo",
+      version: "1.0.0",
+      author: "owner",
+      tags: ["github"],
+      instructions: "# Repo\n",
+    });
+
+    await expect(
+      SkillInstaller.installFromGithub("https://github.com/owner/repo", mockDb),
+    ).resolves.toBe("skill-cleanup");
+
+    expect(
+      fsSync.existsSync(path.join(managedSkillsDir(), "owner-repo")),
+    ).toBe(false);
+    const managedRepoPath = dbMock.update.mock.calls[0]?.[1]?.local_repo_path;
+    expect(typeof managedRepoPath).toBe("string");
+    expect(fsSync.existsSync(path.join(String(managedRepoPath), "SKILL.md"))).toBe(
+      true,
+    );
+  });
+
+  it("rolls back the created DB row when post-create persistence fails", async () => {
+    await SkillInstaller.init();
+
+    const dbMock = {
+      getByName: vi.fn().mockReturnValue(null),
+      create: vi.fn().mockReturnValue({
+        id: "skill-rollback",
+        name: "repo",
+        source_id: "source-repo-main",
+        local_repo_path: path.join(managedSkillsDir(), "owner-repo"),
+      }),
+      update: vi.fn().mockImplementation(() => {
+        throw new Error("update failed");
+      }),
+      delete: vi.fn(),
+    };
+    const mockDb = dbMock as unknown as SkillDB;
+
+    vi.spyOn(skillInstallerUtils, "gitClone").mockImplementation(
+      async (_url, destDir) => {
+        await fs.mkdir(destDir, { recursive: true });
+        await fs.writeFile(path.join(destDir, "SKILL.md"), "# Repo\n");
+      },
+    );
+    vi.spyOn(SkillInstaller, "resolveSingleSkillDirFromRepo").mockImplementation(
+      async (installDir) => installDir,
+    );
+    vi.spyOn(SkillInstaller, "readManifest").mockResolvedValue({
+      name: "repo",
+      description: "Repo",
+      version: "1.0.0",
+      author: "owner",
+      tags: ["github"],
+      instructions: "# Repo\n",
+    });
+    await expect(
+      SkillInstaller.installFromGithub("https://github.com/owner/repo", mockDb),
+    ).rejects.toThrow("update failed");
+
+    expect(dbMock.delete).toHaveBeenCalledWith("skill-rollback");
+    expect(
+      fsSync.existsSync(path.join(managedSkillsDir(), "owner-repo")),
+    ).toBe(false);
   });
 
   it("rejects when a skill with the derived repo name already exists in DB", async () => {
@@ -1974,9 +3224,11 @@ describe("SkillInstaller.installFromGithub", () => {
       update: vi.fn(),
     } as unknown as SkillDB;
 
-    vi.spyOn(skillInstallerUtils, "gitClone").mockImplementation(async (_url, destDir) => {
-      await fs.mkdir(destDir, { recursive: true });
-    });
+    vi.spyOn(skillInstallerUtils, "gitClone").mockImplementation(
+      async (_url, destDir) => {
+        await fs.mkdir(destDir, { recursive: true });
+      },
+    );
     vi.spyOn(SkillInstaller, "resolveSingleSkillDirFromRepo").mockResolvedValue(
       path.join(managedSkillsDir(), "owner-repo"),
     );
@@ -2000,29 +3252,54 @@ describe("SkillInstaller.installFromGithub", () => {
       path.join(managedSkillsDir(), "owner-repo"),
     );
   });
-
 });
 
 describe("SkillInstaller.scanRemoteGithub", () => {
-  it("accepts HTTPS Gitea URLs and forwards the exact clone URL", async () => {
+  it("scans HTTPS Gitea stores by reading only tree metadata and SKILL.md files", async () => {
     await SkillInstaller.init();
 
-    vi.spyOn(skillInstallerUtils, "gitClone").mockResolvedValue(undefined);
-    vi.spyOn(SkillInstaller, "scanLocalPreview").mockResolvedValue([
-      {
-        name: "gitea-skill",
-        description: "A skill from Gitea",
-        version: "1.0.0",
-        author: "icelemon",
-        tags: ["gitea"],
-        instructions: "# Gitea skill\n\nContent",
-        directory_fingerprint: "gitea-fingerprint",
-        filePath: "/tmp/gitea-skill/SKILL.md",
-        localPath: "/tmp/gitea-skill",
-        platforms: ["claude"],
-        protocol_type: "skill",
-      },
-    ]);
+    const cloneSpy = vi.spyOn(skillInstallerUtils, "gitClone");
+    const scanLocalPreviewSpy = vi.spyOn(SkillInstaller, "scanLocalPreview");
+    const fetchRemoteContent = vi
+      .spyOn(SkillInstaller, "fetchRemoteContent")
+      .mockImplementation(async (url: string) => {
+        if (url === "https://gitea.example.com/api/v1/repos/icelemon/skills") {
+          return JSON.stringify({ default_branch: "main" });
+        }
+        if (
+          url ===
+          "https://gitea.example.com/api/v1/repos/icelemon/skills/git/trees/main?recursive=1"
+        ) {
+          return JSON.stringify({
+            tree: [
+              { path: "gitea-skill/SKILL.md", type: "blob", sha: "skill-sha" },
+              {
+                path: "gitea-skill/docs/guide.md",
+                type: "blob",
+                sha: "guide-sha",
+              },
+            ],
+          });
+        }
+        if (
+          url ===
+          "https://gitea.example.com/api/v1/repos/icelemon/skills/raw/gitea-skill/SKILL.md?ref=main"
+        ) {
+          return [
+            "---",
+            "name: gitea-skill",
+            "description: A skill from Gitea",
+            "version: 1.0.0",
+            "author: icelemon",
+            "tags: [gitea]",
+            "---",
+            "# Gitea skill",
+            "",
+            "Content",
+          ].join("\n");
+        }
+        throw new Error(`Unexpected URL: ${url}`);
+      });
 
     const result = await SkillInstaller.scanRemoteGithub(
       "https://gitea.example.com/icelemon/skills",
@@ -2032,37 +3309,54 @@ describe("SkillInstaller.scanRemoteGithub", () => {
     expect(result).toHaveLength(1);
     expect(result[0].slug).toBe("gitea-skill");
     expect(result[0].author).toBe("icelemon");
-    expect(result[0].directory_fingerprint).toBe("gitea-fingerprint");
+    expect(result[0].directory_fingerprint).toBeTruthy();
     expect(result[0].source_url).toBe(
-      "https://gitea.example.com/icelemon/skills",
+      "https://gitea.example.com/icelemon/skills/tree/main/gitea-skill",
     );
-    expect(result[0].content_url).toBeUndefined();
-    expect(skillInstallerUtils.gitClone).toHaveBeenCalledWith(
-      "https://gitea.example.com/icelemon/skills",
-      expect.stringContaining("icelemon-skills"),
-      undefined,
+    expect(result[0].content_url).toBe(
+      "https://gitea.example.com/api/v1/repos/icelemon/skills/raw/gitea-skill/SKILL.md?ref=main",
     );
+    expect(fetchRemoteContent).toHaveBeenCalledTimes(3);
+    expect(cloneSpy).not.toHaveBeenCalled();
+    expect(scanLocalPreviewSpy).not.toHaveBeenCalled();
   });
 
-  it("accepts SSH Gitea URLs and forwards the exact clone URL", async () => {
+  it("scans SSH Gitea store URLs through the same SKILL.md-only metadata path", async () => {
     await SkillInstaller.init();
 
-    vi.spyOn(skillInstallerUtils, "gitClone").mockResolvedValue(undefined);
-    vi.spyOn(SkillInstaller, "scanLocalPreview").mockResolvedValue([
-      {
-        name: "ssh-skill",
-        description: "SSH skill",
-        version: "1.0.0",
-        author: "owner",
-        tags: ["ssh"],
-        instructions: "# SSH skill",
-        directory_fingerprint: "ssh-fingerprint",
-        filePath: "/tmp/ssh-skill/SKILL.md",
-        localPath: "/tmp/ssh-skill",
-        platforms: ["claude"],
-        protocol_type: "skill",
+    const cloneSpy = vi.spyOn(skillInstallerUtils, "gitClone");
+    vi.spyOn(SkillInstaller, "fetchRemoteContent").mockImplementation(
+      async (url: string) => {
+        if (url === "https://gitea.example.com/api/v1/repos/icelemon/skills") {
+          return JSON.stringify({ default_branch: "stable" });
+        }
+        if (
+          url ===
+          "https://gitea.example.com/api/v1/repos/icelemon/skills/git/trees/stable?recursive=1"
+        ) {
+          return JSON.stringify({
+            tree: [
+              { path: "ssh-skill/SKILL.md", type: "blob", sha: "ssh-sha" },
+            ],
+          });
+        }
+        if (
+          url ===
+          "https://gitea.example.com/api/v1/repos/icelemon/skills/raw/ssh-skill/SKILL.md?ref=stable"
+        ) {
+          return [
+            "---",
+            "name: ssh-skill",
+            "description: SSH skill",
+            "author: owner",
+            "tags: [ssh]",
+            "---",
+            "# SSH skill",
+          ].join("\n");
+        }
+        throw new Error(`Unexpected URL: ${url}`);
       },
-    ]);
+    );
 
     const result = await SkillInstaller.scanRemoteGithub(
       "git@gitea.example.com:icelemon/skills.git",
@@ -2071,36 +3365,48 @@ describe("SkillInstaller.scanRemoteGithub", () => {
 
     expect(result).toHaveLength(1);
     expect(result[0].slug).toBe("ssh-skill");
-    expect(result[0].directory_fingerprint).toBe("ssh-fingerprint");
     expect(result[0].source_url).toBe(
-      "https://gitea.example.com/icelemon/skills",
+      "https://gitea.example.com/icelemon/skills/tree/stable/ssh-skill",
     );
-    expect(result[0].content_url).toBeUndefined();
-    expect(skillInstallerUtils.gitClone).toHaveBeenCalledWith(
-      "git@gitea.example.com:icelemon/skills.git",
-      expect.stringContaining("icelemon-skills"),
-      undefined,
+    expect(result[0].content_url).toBe(
+      "https://gitea.example.com/api/v1/repos/icelemon/skills/raw/ssh-skill/SKILL.md?ref=stable",
     );
+    expect(cloneSpy).not.toHaveBeenCalled();
   });
 
   it("keeps source identity stable across refreshes even when clone roots differ", async () => {
     await SkillInstaller.init();
 
-    const cloneRoots = [
-      path.join(tmpDir, "clone-a"),
-      path.join(tmpDir, "clone-b"),
-    ];
-    let cloneIndex = 0;
-
-    vi.spyOn(skillInstallerUtils, "gitClone").mockImplementation(
-      async (_repoUrl: string, repoDir: string) => {
-        const sourceRoot = cloneRoots[cloneIndex] || cloneRoots[cloneRoots.length - 1];
-        cloneIndex += 1;
-        const sourceSkillDir = path.join(sourceRoot, "skills", "writer");
-        await fs.mkdir(sourceSkillDir, { recursive: true });
-        await fs.writeFile(
-          path.join(sourceSkillDir, "SKILL.md"),
-          [
+    const cloneSpy = vi.spyOn(skillInstallerUtils, "gitClone");
+    vi.spyOn(SkillInstaller, "fetchRemoteContent").mockImplementation(
+      async (url: string) => {
+        if (url === "https://gitea.example.com/api/v1/repos/icelemon/skills") {
+          return JSON.stringify({ default_branch: "main" });
+        }
+        if (
+          url ===
+          "https://gitea.example.com/api/v1/repos/icelemon/skills/git/trees/main?recursive=1"
+        ) {
+          return JSON.stringify({
+            tree: [
+              {
+                path: "skills/writer/SKILL.md",
+                type: "blob",
+                sha: "writer-sha",
+              },
+              {
+                path: "skills/writer/references/style.md",
+                type: "blob",
+                sha: "style-sha",
+              },
+            ],
+          });
+        }
+        if (
+          url ===
+          "https://gitea.example.com/api/v1/repos/icelemon/skills/raw/skills/writer/SKILL.md?ref=main"
+        ) {
+          return [
             "---",
             "name: writer",
             "description: Nested writer skill",
@@ -2110,10 +3416,9 @@ describe("SkillInstaller.scanRemoteGithub", () => {
             "---",
             "",
             "# writer",
-          ].join("\n"),
-          "utf-8",
-        );
-        await fs.cp(sourceRoot, repoDir, { recursive: true });
+          ].join("\n");
+        }
+        throw new Error(`Unexpected URL: ${url}`);
       },
     );
 
@@ -2143,6 +3448,7 @@ describe("SkillInstaller.scanRemoteGithub", () => {
     expect(second[0].source_url).toBe(
       "https://gitea.example.com/icelemon/skills/tree/main/skills/writer",
     );
+    expect(cloneSpy).not.toHaveBeenCalled();
   });
 });
 

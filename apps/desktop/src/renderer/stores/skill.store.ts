@@ -12,16 +12,17 @@ import type {
   MCPServerConfig,
   ScanLocalResult,
   SkillProject,
+  SkillPlatformScanResult,
   SkillSafetyLevel,
   SkillSafetyReport,
   SafetyScanAIConfig,
 } from "@prompthub/shared/types";
+import { SKILL_CATEGORIES } from "@prompthub/shared/constants/skill-categories";
+import { isGitHubHost, parseGitRepo } from "@prompthub/shared/utils/git-repo";
 import {
-  BUILTIN_SKILL_REGISTRY,
-  SKILL_CATEGORIES,
-} from "@prompthub/shared/constants/skill-registry";
-import { buildSkillSourceId } from "@prompthub/shared/utils/skill-identity";
-import { chatCompletion } from "../services/ai";
+  buildSkillSourceId,
+  shouldIgnoreSkillDirectoryEntry,
+} from "@prompthub/shared/utils/skill-identity";
 import { resolveScenarioAIConfig } from "../services/ai-defaults";
 import {
   filterVisibleScannedSkills,
@@ -45,6 +46,10 @@ import {
 import { scheduleAllSaveSync } from "../services/webdav-save-sync";
 import { useSettingsStore } from "./settings.store";
 import { getSafetyScanAIConfig } from "../components/skill/detail-utils";
+import {
+  getRemoteStoreSkillCount,
+  getRemoteStoreSkills,
+} from "../services/remote-store-entry";
 
 export type SkillFilterType =
   | "all"
@@ -53,7 +58,21 @@ export type SkillFilterType =
   | "deployed"
   | "pending";
 export type SkillViewMode = "gallery" | "list";
-export type SkillStoreView = "my-skills" | "projects" | "distribution" | "store";
+export type SkillGalleryColumnMode =
+  | "auto"
+  | "2"
+  | "3"
+  | "4"
+  | "5"
+  | "6"
+  | "7"
+  | "8";
+export type SkillStoreView =
+  | "my-skills"
+  | "projects"
+  | "agents"
+  | "distribution"
+  | "store";
 // Translation cache constraints
 // 翻译缓存限制
 const TRANSLATION_CACHE_MAX_SIZE = 200;
@@ -61,6 +80,29 @@ const TRANSLATION_CACHE_EVICT_COUNT = 50;
 const TRANSLATION_CACHE_TTL = 7 * 24 * 60 * 60 * 1000; // 7 days in ms
 const REMOTE_CONTENT_CONCURRENCY = 6;
 const REMOTE_REPO_SYNC_CONCURRENCY = 6;
+const DEPLOYED_STATUS_CACHE_TTL_MS = 30_000;
+
+let deployedStatusRefreshPromise: Promise<void> | null = null;
+let deployedStatusLoadedAt = 0;
+let skillTranslationAIPromise:
+  | Promise<{
+      chatCompletion: typeof import("../services/ai").chatCompletion;
+    }>
+  | null = null;
+
+function loadSkillTranslationAI() {
+  skillTranslationAIPromise ??= import("../services/ai").then((aiService) => ({
+    chatCompletion: aiService.chatCompletion,
+  }));
+  return skillTranslationAIPromise;
+}
+
+async function loadBuiltinSkillRegistry(): Promise<RegistrySkill[]> {
+  const { BUILTIN_SKILL_REGISTRY } = await import(
+    "@prompthub/shared/constants/skill-registry"
+  );
+  return BUILTIN_SKILL_REGISTRY.map(ensureRegistrySkillSourceId);
+}
 
 interface ParsedGitHubSkillLocation {
   owner: string;
@@ -104,6 +146,13 @@ export interface ProjectSkillScanState {
   error?: string | null;
 }
 
+export interface AgentSkillScanState {
+  result: SkillPlatformScanResult | null;
+  isScanning: boolean;
+  scannedAt?: number;
+  error?: string | null;
+}
+
 function sanitizePersistedProjectScanState(
   projectScanState: Record<string, ProjectSkillScanState>,
 ): Record<string, ProjectSkillScanState> {
@@ -130,9 +179,43 @@ function sanitizePersistedProjectScanState(
   return nextState;
 }
 
+function sanitizePersistedAgentScanState(
+  agentScanState: Record<string, AgentSkillScanState>,
+): Record<string, AgentSkillScanState> {
+  const nextState: Record<string, AgentSkillScanState> = {};
+
+  for (const [platformId, state] of Object.entries(agentScanState)) {
+    if (!state) {
+      continue;
+    }
+
+    nextState[platformId] = {
+      result: state.result
+        ? {
+            ...state.result,
+            scannedSkills: Array.isArray(state.result.scannedSkills)
+              ? state.result.scannedSkills.map((skill) => ({
+                  ...skill,
+                  instructions: "",
+                }))
+              : [],
+          }
+        : null,
+      isScanning: false,
+      scannedAt: state.scannedAt,
+      error: state.error ?? null,
+    };
+  }
+
+  return nextState;
+}
+
 export type RegistrySkillUpdateResult =
   | { status: "updated"; skill: Skill; check: RegistrySkillUpdateCheck }
-  | { status: "up-to-date" | "conflict" | "local-modified" | "not-installed"; check: RegistrySkillUpdateCheck };
+  | {
+      status: "up-to-date" | "conflict" | "local-modified" | "not-installed";
+      check: RegistrySkillUpdateCheck;
+    };
 
 /**
  * Prune the translation cache: remove expired entries and evict oldest
@@ -177,8 +260,8 @@ function getTranslationStateFromCache(
 
   const isStale = Boolean(
     sourceFingerprint &&
-      entry.sourceFingerprint &&
-      entry.sourceFingerprint !== sourceFingerprint,
+    entry.sourceFingerprint &&
+    entry.sourceFingerprint !== sourceFingerprint,
   );
 
   return {
@@ -268,9 +351,110 @@ function hasMeaningfulSkillBody(content?: string): boolean {
 
 function getRegistrySkillCandidates(state: SkillState): RegistrySkill[] {
   const remoteSkills = Object.values(state.remoteStoreEntries).flatMap(
-    (entry) => entry.skills,
+    (entry) => getRemoteStoreSkills(entry),
   );
   return [...state.registrySkills, ...remoteSkills];
+}
+
+function findRegistrySkillCandidateByKey(
+  state: SkillState,
+  key: string,
+): RegistrySkill | null {
+  const normalizedKey = key.trim().toLowerCase();
+  if (!normalizedKey) {
+    return null;
+  }
+
+  return (
+    getRegistrySkillCandidates(state).find((skill) =>
+      [skill.source_id, skill.slug, skill.source_url, skill.content_url].some(
+        (value) => value?.trim().toLowerCase() === normalizedKey,
+      ),
+    ) || null
+  );
+}
+
+function deriveGitHubSkillContentUrl(
+  sourceUrl?: string,
+  contentUrl?: string,
+): string | undefined {
+  if (contentUrl?.trim()) {
+    return contentUrl;
+  }
+
+  const location = parseGitHubSkillLocation(sourceUrl, contentUrl);
+  if (!location?.directoryPath) {
+    return undefined;
+  }
+
+  return `https://raw.githubusercontent.com/${location.owner}/${location.repo}/${location.branch}/${location.directoryPath}/SKILL.md`;
+}
+
+function getInstalledSkillSourceCandidateKeys(skill: Skill): string[] {
+  return [skill.source_id, skill.content_url, skill.source_url].filter(
+    (value): value is string =>
+      typeof value === "string" && value.trim().length > 0,
+  );
+}
+
+function buildInstalledSkillSourceCandidate(
+  skill: Skill,
+): RegistrySkill | null {
+  const contentUrl = deriveGitHubSkillContentUrl(
+    skill.source_url,
+    skill.content_url,
+  );
+  const sourceUrl = skill.source_url?.trim();
+  if (!sourceUrl && !contentUrl) {
+    return null;
+  }
+
+  return {
+    slug: skill.registry_slug || skill.logical_name || skill.name,
+    name: skill.name,
+    install_name: skill.name,
+    source_id:
+      skill.source_id ||
+      buildSkillSourceId({
+        sourceType: "installed-source",
+        sourceUrl,
+        branch: skill.source_branch,
+        directory: skill.source_directory,
+        skillPath: skill.canonical_skill_path || contentUrl,
+      }),
+    source_label: skill.source_label,
+    source_branch: skill.source_branch,
+    source_directory: skill.source_directory,
+    canonical_skill_path: skill.canonical_skill_path,
+    directory_fingerprint: skill.directory_fingerprint,
+    description: skill.description || "",
+    category: skill.category || "general",
+    icon_url: skill.icon_url,
+    icon_emoji: skill.icon_emoji,
+    icon_background: skill.icon_background,
+    author: skill.author || "Unknown",
+    source_url: sourceUrl || contentUrl || "",
+    tags: skill.original_tags || skill.tags || [],
+    version: "source",
+    content: skill.content || skill.instructions || "",
+    content_url: contentUrl,
+    prerequisites: skill.prerequisites,
+    compatibility: skill.compatibility,
+  };
+}
+
+function findInstalledSkillSourceCandidate(
+  state: SkillState,
+  skill: Skill,
+): RegistrySkill | null {
+  for (const key of getInstalledSkillSourceCandidateKeys(skill)) {
+    const candidate = findRegistrySkillCandidateByKey(state, key);
+    if (candidate) {
+      return candidate;
+    }
+  }
+
+  return buildInstalledSkillSourceCandidate(skill);
 }
 
 function ensureRegistrySkillSourceId(skill: RegistrySkill): RegistrySkill {
@@ -288,10 +472,14 @@ function ensureRegistrySkillSourceId(skill: RegistrySkill): RegistrySkill {
   };
 }
 
-function isLocalRegistrySkill(skill: Pick<RegistrySkill, "content_url" | "source_url">): boolean {
+function isLocalRegistrySkill(
+  skill: Pick<RegistrySkill, "content_url" | "source_url">,
+): boolean {
   return Boolean(
-    (typeof skill.content_url === "string" && isLikelyLocalSource(skill.content_url)) ||
-      (typeof skill.source_url === "string" && isLikelyLocalSource(skill.source_url)),
+    (typeof skill.content_url === "string" &&
+      isLikelyLocalSource(skill.content_url)) ||
+    (typeof skill.source_url === "string" &&
+      isLikelyLocalSource(skill.source_url)),
   );
 }
 
@@ -299,7 +487,10 @@ function normalizeLocalRegistryDirectory(
   regSkill: Pick<RegistrySkill, "content_url" | "source_url">,
 ): string {
   const candidates = [regSkill.content_url, regSkill.source_url]
-    .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+    .filter(
+      (value): value is string =>
+        typeof value === "string" && value.trim().length > 0,
+    )
     .map((value) => normalizeLocalSkillDirectoryPath(value));
 
   return candidates[0] ?? "";
@@ -308,20 +499,24 @@ function normalizeLocalRegistryDirectory(
 async function syncLocalRegistrySkillRepo(
   skillId: string,
   regSkill: Pick<RegistrySkill, "content_url" | "source_url">,
-): Promise<void> {
+): Promise<Skill | null> {
   const localDir = normalizeLocalRegistryDirectory(regSkill);
   if (!localDir) {
-    return;
+    return null;
   }
 
   await window.api.skill.saveToRepo(skillId, localDir, "copy");
-  await window.api.skill.syncFromRepo(skillId);
+  const syncedSkill = await window.api.skill.syncFromRepo(skillId);
+  return refreshInstalledContentHashFromSyncedSkill(skillId, syncedSkill);
 }
 
 async function resolveRegistrySkillContent(
   regSkill: RegistrySkill,
 ): Promise<string> {
-  if (typeof regSkill.content_url === "string" && isLikelyLocalSource(regSkill.content_url)) {
+  if (
+    typeof regSkill.content_url === "string" &&
+    isLikelyLocalSource(regSkill.content_url)
+  ) {
     const localDir = normalizeLocalRegistryDirectory(regSkill);
     const localSkillMd = await window.api.skill.readLocalFileByPath(
       localDir,
@@ -335,8 +530,10 @@ async function resolveRegistrySkillContent(
 
   let remoteContent = regSkill.content;
   if (regSkill.content_url) {
-    const freshContent = await window.api.skill.fetchRemoteContent(regSkill.content_url);
-    if (freshContent.trim()) {
+    const freshContent = await window.api.skill.fetchRemoteContent(
+      regSkill.content_url,
+    );
+    if (typeof freshContent === "string" && freshContent.trim()) {
       remoteContent = freshContent;
     }
   }
@@ -374,7 +571,7 @@ function parseGitHubSkillLocation(
       const parsed = new URL(sourceUrl);
       if (parsed.hostname.toLowerCase() === "github.com") {
         const parts = parsed.pathname.split("/").filter(Boolean);
-        if (parts.length >= 5 && parts[2] === "tree") {
+        if (parts.length >= 4 && parts[2] === "tree") {
           return {
             owner: parts[0],
             repo: parts[1],
@@ -393,7 +590,7 @@ function parseGitHubSkillLocation(
       const parsed = new URL(contentUrl);
       if (parsed.hostname.toLowerCase() === "raw.githubusercontent.com") {
         const parts = parsed.pathname.split("/").filter(Boolean);
-        if (parts.length >= 5) {
+        if (parts.length >= 4) {
           return {
             owner: parts[0],
             repo: parts[1],
@@ -411,9 +608,84 @@ function parseGitHubSkillLocation(
 }
 
 function shouldSkipRemoteRepoFile(relativePath: string): boolean {
-  return relativePath
-    .split("/")
-    .some((segment) => segment === ".git" || segment === ".prompthub");
+  return shouldIgnoreSkillDirectoryEntry(relativePath);
+}
+
+function getRegistrySkillDirectory(
+  regSkill: Pick<RegistrySkill, "source_directory" | "canonical_skill_path">,
+): string | undefined {
+  const explicitDirectory = regSkill.source_directory
+    ?.trim()
+    .replace(/^\/+|\/+$/g, "");
+  if (explicitDirectory) {
+    return explicitDirectory;
+  }
+
+  const canonicalPath = regSkill.canonical_skill_path
+    ?.trim()
+    .replace(/^\/+|\/+$/g, "");
+  if (!canonicalPath || canonicalPath.toLowerCase() === "skill.md") {
+    return undefined;
+  }
+
+  const parts = canonicalPath.split("/");
+  parts.pop();
+  return parts.join("/") || undefined;
+}
+
+function shouldCloneRegistrySkillPackage(
+  regSkill: Pick<
+    RegistrySkill,
+    | "source_url"
+    | "content_url"
+    | "package_url"
+    | "store_url"
+    | "source_label"
+    | "source_directory"
+    | "canonical_skill_path"
+    | "directory_fingerprint"
+  >,
+): boolean {
+  const publicDirectoryStoreValues = [
+    regSkill.store_url,
+    regSkill.content_url,
+    regSkill.source_label,
+  ]
+    .filter((value): value is string => typeof value === "string")
+    .map((value) => value.toLowerCase());
+  if (
+    publicDirectoryStoreValues.some(
+      (value) => value.includes("clawhub.ai"),
+    ) &&
+    !getRegistrySkillDirectory(regSkill)
+  ) {
+    return false;
+  }
+
+  if (!regSkill.source_url || isLikelyLocalSource(regSkill.source_url)) {
+    return false;
+  }
+
+  const parsedRepo = parseGitRepo(regSkill.source_url);
+  if (!parsedRepo) {
+    return false;
+  }
+
+  if (
+    publicDirectoryStoreValues.some((value) => value.includes("skills.sh"))
+  ) {
+    return true;
+  }
+
+  if (regSkill.content_url && isGitHubHost(parsedRepo.host)) {
+    return false;
+  }
+
+  return Boolean(
+    getRegistrySkillDirectory(regSkill) ||
+    regSkill.canonical_skill_path ||
+    regSkill.directory_fingerprint,
+  );
 }
 
 async function syncRemoteGitHubSkillRepo(
@@ -422,7 +694,7 @@ async function syncRemoteGitHubSkillRepo(
   contentUrl?: string,
 ): Promise<void> {
   const location = parseGitHubSkillLocation(sourceUrl, contentUrl);
-  if (!location || !location.directoryPath) {
+  if (!location) {
     return;
   }
 
@@ -432,13 +704,17 @@ async function syncRemoteGitHubSkillRepo(
   const treeData = parseJson<{
     tree?: Array<{ path?: string; type?: string }>;
   }>(treeRaw || "{}", {});
-  const directoryPrefix = `${location.directoryPath}/`;
+  const directoryPrefix = location.directoryPath
+    ? `${location.directoryPath}/`
+    : "";
   const files = Array.isArray(treeData.tree)
     ? treeData.tree.filter(
         (entry): entry is { path: string; type: string } =>
           isGitHubTreeEntry(entry) &&
           entry.type === "blob" &&
-          entry.path.startsWith(directoryPrefix),
+          (directoryPrefix
+            ? entry.path.startsWith(directoryPrefix)
+            : true),
       )
     : [];
 
@@ -473,6 +749,55 @@ async function syncRemoteGitHubSkillRepo(
   );
 }
 
+async function syncRemoteRegistrySkillRepo(
+  skillId: string,
+  regSkill: RegistrySkill,
+  effectiveContent: string,
+): Promise<Skill | null> {
+  if (regSkill.package_url?.trim()) {
+    await window.api.skill.saveRemoteZipToRepo(skillId, {
+      zipUrl: regSkill.package_url,
+    });
+    const syncedSkill = await window.api.skill.syncFromRepo(skillId);
+    return refreshInstalledContentHashFromSyncedSkill(skillId, syncedSkill);
+  }
+
+  if (shouldCloneRegistrySkillPackage(regSkill)) {
+    await window.api.skill.saveRemoteGitToRepo(skillId, {
+      repoUrl: regSkill.source_url,
+      branch: regSkill.source_branch,
+      directory: getRegistrySkillDirectory(regSkill),
+    });
+    const syncedSkill = await window.api.skill.syncFromRepo(skillId);
+    return refreshInstalledContentHashFromSyncedSkill(skillId, syncedSkill);
+  }
+
+  await window.api.skill.writeLocalFile(skillId, "SKILL.md", effectiveContent, {
+    skipVersionSnapshot: true,
+  });
+  await syncRemoteGitHubSkillRepo(
+    skillId,
+    regSkill.source_url,
+    regSkill.content_url,
+  );
+  return null;
+}
+
+async function refreshInstalledContentHashFromSyncedSkill(
+  skillId: string,
+  syncedSkill: Skill | null | undefined,
+): Promise<Skill | null> {
+  const syncedContent = syncedSkill?.content ?? syncedSkill?.instructions;
+  if (typeof syncedContent !== "string" || !syncedContent.trim()) {
+    return syncedSkill ?? null;
+  }
+
+  const installedContentHash = await computeSkillContentHash(syncedContent);
+  return window.api.skill.update(skillId, {
+    installed_content_hash: installedContentHash,
+  });
+}
+
 async function runWithConcurrency<T>(
   items: T[],
   limit: number,
@@ -502,6 +827,7 @@ interface SkillState {
   // View mode
   // 视图模式
   viewMode: SkillViewMode;
+  galleryColumns: SkillGalleryColumnMode;
 
   // Search & Filter
   searchQuery: string;
@@ -512,6 +838,7 @@ interface SkillState {
   storeView: SkillStoreView;
   selectedProjectId: string | null;
   projectScanState: Record<string, ProjectSkillScanState>;
+  agentScanState: Record<string, AgentSkillScanState>;
   registrySkills: RegistrySkill[];
   isLoadingRegistry: boolean;
   storeCategory: SkillCategory | "all";
@@ -523,18 +850,30 @@ interface SkillState {
     string,
     {
       loadedAt: number;
+      currentCursor?: string | null;
+      cursorHistory?: Array<string | null>;
       error?: string | null;
+      matchedCount?: number;
+      nextCursor?: string | null;
+      pageCount?: number;
+      pageIndex?: number;
+      pageSize?: number;
+      query?: string;
       skills: RegistrySkill[];
+      totalCount?: number;
     }
   >;
 
   // Actions
-  loadSkills: () => Promise<void>;
+  loadSkills: (options?: { preferCache?: boolean }) => Promise<void>;
   selectSkill: (id: string | null) => void;
   createSkill: (data: CreateSkillParams) => Promise<Skill | null>;
   updateSkill: (id: string, data: UpdateSkillParams) => Promise<Skill | null>;
   syncSkillFromRepo: (id: string) => Promise<Skill | null>;
-  deleteSkill: (id: string) => Promise<boolean>;
+  deleteSkill: (
+    id: string,
+    options?: { removeCopyInstallations?: boolean },
+  ) => Promise<boolean>;
   toggleFavorite: (id: string) => Promise<void>;
   scanLocalSkills: () => Promise<ScanLocalResult>;
   scanLocalPreview: (customPaths?: string[]) => Promise<ScannedSkill[]>;
@@ -565,6 +904,7 @@ interface SkillState {
   // View mode actions
   // 视图模式操作
   setViewMode: (mode: SkillViewMode) => void;
+  setGalleryColumns: (mode: SkillGalleryColumnMode) => void;
 
   // Search & Filter Actions
   setSearchQuery: (query: string) => void;
@@ -583,17 +923,28 @@ interface SkillState {
     projectId: string,
     state: ProjectSkillScanState,
   ) => void;
+  scanAgentPlatformSkills: (
+    platformId: string,
+  ) => Promise<SkillPlatformScanResult>;
+  setAgentScanState: (platformId: string, state: AgentSkillScanState) => void;
   getVisibleProjectScannedSkills: (
     projectId: string,
     options?: { searchQuery?: string },
   ) => ScannedSkill[];
-  loadRegistry: () => void;
+  loadRegistry: () => Promise<void>;
   computeRegistrySkillHash: (content: string) => Promise<string>;
   getRegistrySkillUpdateStatus: (
     skill: RegistrySkill,
   ) => Promise<RegistrySkillUpdateCheck>;
+  getInstalledSkillSourceUpdateStatus: (
+    skillId: string,
+  ) => Promise<RegistrySkillUpdateCheck | null>;
   updateRegistrySkill: (
     sourceId: string,
+    options?: { overwriteLocalChanges?: boolean },
+  ) => Promise<RegistrySkillUpdateResult | null>;
+  updateInstalledSkillFromSource: (
+    skillId: string,
     options?: { overwriteLocalChanges?: boolean },
   ) => Promise<RegistrySkillUpdateResult | null>;
   installRegistrySkill: (skill: RegistrySkill) => Promise<Skill | null>;
@@ -614,7 +965,20 @@ interface SkillState {
   toggleCustomStoreSource: (id: string) => void;
   setRemoteStoreEntry: (
     sourceId: string,
-    entry: { loadedAt: number; error?: string | null; skills: RegistrySkill[] },
+    entry: {
+      loadedAt: number;
+      currentCursor?: string | null;
+      cursorHistory?: Array<string | null>;
+      error?: string | null;
+      matchedCount?: number;
+      nextCursor?: string | null;
+      pageCount?: number;
+      pageIndex?: number;
+      pageSize?: number;
+      query?: string;
+      skills: RegistrySkill[];
+      totalCount?: number;
+    },
   ) => void;
   getInstalledSlugs: () => string[];
   getRecommendedSkills: () => RegistrySkill[];
@@ -626,7 +990,7 @@ interface SkillState {
   // Deployed tracking
   // 已分发到平台的技能名称集合
   deployedSkillNames: Set<string>;
-  loadDeployedStatus: () => Promise<void>;
+  loadDeployedStatus: (options?: { force?: boolean }) => Promise<void>;
 
   // Translation cache (with TTL + size limit)
   // 翻译缓存（带 TTL + 大小限制）
@@ -645,6 +1009,186 @@ interface SkillState {
   clearTranslation: (cacheKey: string) => void;
 }
 
+type RemoteStoreEntry = SkillState["remoteStoreEntries"][string];
+
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function isRegistrySkillLike(value: unknown): value is RegistrySkill {
+  if (!isObjectRecord(value)) {
+    return false;
+  }
+
+  return (
+    typeof value.slug === "string" &&
+    typeof value.name === "string" &&
+    typeof value.description === "string" &&
+    typeof value.category === "string" &&
+    typeof value.author === "string" &&
+    typeof value.source_url === "string" &&
+    typeof value.version === "string" &&
+    typeof value.content === "string" &&
+    Array.isArray(value.tags)
+  );
+}
+
+function normalizeRemoteRegistrySkill(
+  sourceId: string,
+  skill: RegistrySkill,
+  customStoreSources: SkillStoreSource[],
+): RegistrySkill {
+  const source = customStoreSources.find((item) => item.id === sourceId);
+  const skillPath = skill.canonical_skill_path || skill.content_url || skill.slug;
+
+  if (source?.type === "git-repo") {
+    try {
+      const normalizedSource = normalizeGitStoreSourceInput(
+        source.url,
+        source.branch,
+        source.directory,
+      );
+      return {
+        ...skill,
+        source_id: buildSkillSourceId({
+          sourceType: "git-repo",
+          sourceUrl: normalizedSource.url,
+          branch: normalizedSource.branch,
+          directory: normalizedSource.directory,
+          skillPath,
+        }),
+        source_branch: normalizedSource.branch,
+        source_directory: normalizedSource.directory,
+        canonical_skill_path: skillPath,
+      };
+    } catch {
+      return skill;
+    }
+  }
+
+  if (source?.type === "local-dir" || isLocalRegistrySkill(skill)) {
+    return {
+      ...skill,
+      source_id: buildSkillSourceId({
+        sourceType: "local-dir",
+        sourceUrl: skill.source_url || source?.url,
+        skillPath,
+      }),
+      source_branch: undefined,
+      source_directory: undefined,
+      canonical_skill_path: skillPath,
+    };
+  }
+
+  if (source?.type === "marketplace-json") {
+    return {
+      ...skill,
+      source_id: buildSkillSourceId({
+        sourceType: "marketplace-json",
+        sourceUrl: skill.source_url || source.url,
+        skillPath,
+      }),
+      canonical_skill_path: skillPath,
+    };
+  }
+
+  return ensureRegistrySkillSourceId(skill);
+}
+
+function normalizeRemoteStoreEntries(
+  entries: unknown,
+  customStoreSources: SkillStoreSource[],
+): SkillState["remoteStoreEntries"] {
+  if (!isObjectRecord(entries)) {
+    return {};
+  }
+
+  const normalizedEntries: SkillState["remoteStoreEntries"] = {};
+  for (const [sourceId, entry] of Object.entries(entries)) {
+    if (!isObjectRecord(entry) || !Array.isArray(entry.skills)) {
+      continue;
+    }
+
+    const skills = entry.skills
+      .filter(isRegistrySkillLike)
+      .map((skill) =>
+        normalizeRemoteRegistrySkill(sourceId, skill, customStoreSources),
+      );
+    if (skills.length === 0) {
+      continue;
+    }
+
+    normalizedEntries[sourceId] = {
+      ...(entry as Partial<RemoteStoreEntry>),
+      loadedAt: typeof entry.loadedAt === "number" ? entry.loadedAt : 0,
+      error: null,
+      skills,
+    };
+  }
+
+  return normalizedEntries;
+}
+
+async function applyRegistrySkillUpdateToInstalledSkill(
+  installedSkill: Skill,
+  regSkill: RegistrySkill,
+  check: RegistrySkillUpdateCheck,
+  options: {
+    notePrefix: string;
+    markAsBuiltin: boolean;
+    updateSkill: SkillState["updateSkill"];
+  },
+): Promise<Skill | null> {
+  await window.api.skill.versionCreate(
+    installedSkill.id,
+    `${options.notePrefix}: ${installedSkill.version || "unknown"} -> ${regSkill.version}`,
+  );
+  scheduleAllSaveSync("skill:create-version");
+
+  const now = Date.now();
+  const updatedSkill = await options.updateSkill(installedSkill.id, {
+    description: regSkill.description,
+    instructions: check.remoteContent,
+    content: check.remoteContent,
+    version: regSkill.version,
+    author: regSkill.author,
+    source_url: regSkill.source_url,
+    source_id: regSkill.source_id,
+    source_label: installedSkill.source_label || regSkill.source_label,
+    source_branch: regSkill.source_branch,
+    source_directory: regSkill.source_directory,
+    canonical_skill_path: regSkill.canonical_skill_path,
+    icon_url: regSkill.icon_url,
+    icon_emoji: regSkill.icon_emoji,
+    icon_background: regSkill.icon_background,
+    category: regSkill.category,
+    is_builtin: options.markAsBuiltin ? true : installedSkill.is_builtin,
+    registry_slug: regSkill.slug,
+    directory_fingerprint: regSkill.directory_fingerprint,
+    content_url: regSkill.content_url,
+    original_tags: regSkill.tags,
+    prerequisites: regSkill.prerequisites,
+    compatibility: regSkill.compatibility,
+    installed_content_hash: check.remoteHash,
+    installed_version: regSkill.version,
+    updated_from_store_at: now,
+  });
+
+  if (!updatedSkill) {
+    return null;
+  }
+
+  const syncedSkill = isLocalRegistrySkill(regSkill)
+    ? await syncLocalRegistrySkillRepo(installedSkill.id, regSkill)
+    : await syncRemoteRegistrySkillRepo(
+      installedSkill.id,
+      regSkill,
+      check.remoteContent,
+    );
+
+  return syncedSkill ?? updatedSkill;
+}
+
 export const useSkillStore = create<SkillState>()(
   persist(
     (set, get) => ({
@@ -653,6 +1197,7 @@ export const useSkillStore = create<SkillState>()(
       isLoading: false,
       error: null,
       viewMode: "gallery" as SkillViewMode,
+      galleryColumns: "auto" as SkillGalleryColumnMode,
       searchQuery: "",
       filterType: "all",
       filterTags: [] as string[],
@@ -664,6 +1209,7 @@ export const useSkillStore = create<SkillState>()(
       storeView: "my-skills" as SkillStoreView,
       selectedProjectId: null,
       projectScanState: {},
+      agentScanState: {},
       registrySkills: [] as RegistrySkill[],
       isLoadingRegistry: false,
       storeCategory: "all" as SkillCategory | "all",
@@ -673,8 +1219,13 @@ export const useSkillStore = create<SkillState>()(
       selectedStoreSourceId: "official",
       remoteStoreEntries: {},
 
-      loadSkills: async () => {
-        set({ isLoading: true, error: null });
+      loadSkills: async (options) => {
+        const hasCachedSkills = get().skills.length > 0;
+        if (!options?.preferCache || !hasCachedSkills) {
+          set({ isLoading: true, error: null });
+        } else {
+          set({ error: null });
+        }
         try {
           const skills = normalizeSkills(await window.api.skill.getAll());
           set({ skills, isLoading: false });
@@ -684,22 +1235,46 @@ export const useSkillStore = create<SkillState>()(
         }
       },
 
-      loadDeployedStatus: async () => {
-        const { skills } = get();
-        const deployed = new Set<string>();
-        try {
-          const skillIds = skills.map((s) => s.id);
-          const results =
-            await window.api.skill.getMdInstallStatusBatch(skillIds);
-          for (const [skillId, status] of Object.entries(results)) {
-            if (Object.values(status).some(Boolean)) {
-              deployed.add(skillId);
-            }
-          }
-        } catch (error) {
-          console.warn("Failed to load deployed status:", error);
+      loadDeployedStatus: async (options) => {
+        if (!options?.force && deployedStatusRefreshPromise) {
+          return deployedStatusRefreshPromise;
         }
-        set({ deployedSkillNames: deployed });
+        if (
+          !options?.force &&
+          deployedStatusLoadedAt > 0 &&
+          Date.now() - deployedStatusLoadedAt < DEPLOYED_STATUS_CACHE_TTL_MS
+        ) {
+          return;
+        }
+
+        const { skills } = get();
+        const run = async () => {
+          const deployed = new Set<string>();
+          try {
+            const skillIds = skills.map((s) => s.id);
+            if (skillIds.length === 0) {
+              set({ deployedSkillNames: deployed });
+              deployedStatusLoadedAt = Date.now();
+              return;
+            }
+            const results =
+              await window.api.skill.getMdInstallStatusBatch(skillIds);
+            for (const [skillId, status] of Object.entries(results)) {
+              if (Object.values(status).some(Boolean)) {
+                deployed.add(skillId);
+              }
+            }
+            deployedStatusLoadedAt = Date.now();
+          } catch (error) {
+            console.warn("Failed to load deployed status:", error);
+          }
+          set({ deployedSkillNames: deployed });
+        };
+
+        deployedStatusRefreshPromise = run().finally(() => {
+          deployedStatusRefreshPromise = null;
+        });
+        return deployedStatusRefreshPromise;
       },
 
       selectSkill: (id) => {
@@ -820,9 +1395,12 @@ export const useSkillStore = create<SkillState>()(
         }
       },
 
-      deleteSkill: async (id) => {
+      deleteSkill: async (id, options) => {
         try {
-          const success = await window.api.skill.delete(id);
+          const success =
+            options === undefined
+              ? await window.api.skill.delete(id)
+              : await window.api.skill.delete(id, options);
           if (success) {
             set((state) => ({
               skills: state.skills.filter((s) => s.id !== id),
@@ -863,8 +1441,10 @@ export const useSkillStore = create<SkillState>()(
           const aiConfig = getSafetyScanAIConfig(
             useSettingsStore.getState().aiModels,
           );
-          const scannedSkills =
-            await window.api.skill.scanLocalPreview(customPaths, aiConfig);
+          const scannedSkills = await window.api.skill.scanLocalPreview(
+            customPaths,
+            aiConfig,
+          );
           set({ isLoading: false });
           return scannedSkills;
         } catch (error) {
@@ -896,6 +1476,11 @@ export const useSkillStore = create<SkillState>()(
 
             try {
               const userTags = userTagsByPath?.[scanned.localPath] ?? [];
+              const scannedPlatformName =
+                "platformSkillPath" in scanned &&
+                typeof scanned.platforms?.[0] === "string"
+                  ? scanned.platforms[0]
+                  : undefined;
               const newSkill = await window.api.skill.create({
                 name: scanned.name,
                 description: scanned.description,
@@ -908,6 +1493,7 @@ export const useSkillStore = create<SkillState>()(
                 original_tags: scanned.tags,
                 is_favorite: false,
                 source_url: scanned.localPath,
+                source_label: scannedPlatformName,
                 local_repo_path: scanned.localPath,
               });
 
@@ -1099,6 +1685,10 @@ export const useSkillStore = create<SkillState>()(
         set({ viewMode: mode });
       },
 
+      setGalleryColumns: (mode) => {
+        set({ galleryColumns: mode });
+      },
+
       setSearchQuery: (query) => {
         set({ searchQuery: query });
       },
@@ -1171,9 +1761,8 @@ export const useSkillStore = create<SkillState>()(
         }));
 
         try {
-          const scannedSkills = await window.api.skill.scanLocalPreview(
-            uniquePaths,
-          );
+          const scannedSkills =
+            await window.api.skill.scanLocalPreview(uniquePaths);
           const nextState: ProjectSkillScanState = {
             scannedSkills,
             isScanning: false,
@@ -1201,7 +1790,7 @@ export const useSkillStore = create<SkillState>()(
               },
             },
           }));
-          throw (error instanceof Error ? error : new Error(errorMessage));
+          throw error instanceof Error ? error : new Error(errorMessage);
         }
       },
 
@@ -1210,6 +1799,59 @@ export const useSkillStore = create<SkillState>()(
           projectScanState: {
             ...current.projectScanState,
             [projectId]: state,
+          },
+        }));
+      },
+
+      scanAgentPlatformSkills: async (platformId) => {
+        set((state) => ({
+          agentScanState: {
+            ...state.agentScanState,
+            [platformId]: {
+              ...(state.agentScanState[platformId] || { result: null }),
+              isScanning: true,
+              error: null,
+            },
+          },
+        }));
+
+        try {
+          const result = await window.api.skill.scanPlatformSkills(platformId);
+          const nextState: AgentSkillScanState = {
+            result,
+            isScanning: false,
+            scannedAt: Date.now(),
+            error: null,
+          };
+          set((state) => ({
+            agentScanState: {
+              ...state.agentScanState,
+              [platformId]: nextState,
+            },
+          }));
+          return result;
+        } catch (error) {
+          const errorMessage = getErrorMessage(error);
+          set((state) => ({
+            agentScanState: {
+              ...state.agentScanState,
+              [platformId]: {
+                result: state.agentScanState[platformId]?.result ?? null,
+                isScanning: false,
+                scannedAt: state.agentScanState[platformId]?.scannedAt,
+                error: errorMessage,
+              },
+            },
+          }));
+          throw error instanceof Error ? error : new Error(errorMessage);
+        }
+      },
+
+      setAgentScanState: (platformId, state) => {
+        set((current) => ({
+          agentScanState: {
+            ...current.agentScanState,
+            [platformId]: state,
           },
         }));
       },
@@ -1223,12 +1865,16 @@ export const useSkillStore = create<SkillState>()(
         );
       },
 
-      loadRegistry: () => {
+      loadRegistry: async () => {
         set({ isLoadingRegistry: true });
-        // Load built-in registry with embedded content
-        // 加载内置注册表（使用嵌入内容）
-        const registry = BUILTIN_SKILL_REGISTRY.map(ensureRegistrySkillSourceId);
-        set({ registrySkills: registry, isLoadingRegistry: false });
+        try {
+          const registry = await loadBuiltinSkillRegistry();
+          set({ registrySkills: registry, isLoadingRegistry: false });
+        } catch (error) {
+          const message = getErrorMessage(error);
+          set({ isLoadingRegistry: false, error: message });
+          throw error instanceof Error ? error : new Error(message);
+        }
       },
 
       computeRegistrySkillHash: computeSkillContentHash,
@@ -1243,10 +1889,30 @@ export const useSkillStore = create<SkillState>()(
         );
       },
 
-      updateRegistrySkill: async (sourceId, options) => {
-        const regSkill = getRegistrySkillCandidates(get()).find(
-          (skill) => skill.source_id === sourceId,
+      getInstalledSkillSourceUpdateStatus: async (skillId) => {
+        const installedSkill = get().skills.find((skill) => skill.id === skillId);
+        if (!installedSkill) {
+          return null;
+        }
+
+        const regSkill = findInstalledSkillSourceCandidate(
+          get(),
+          installedSkill,
         );
+        if (!regSkill) {
+          return null;
+        }
+
+        const remoteContent = await resolveRegistrySkillContent(regSkill);
+        return getRegistrySkillUpdateStatus(
+          installedSkill,
+          regSkill,
+          remoteContent,
+        );
+      },
+
+      updateRegistrySkill: async (sourceId, options) => {
+        const regSkill = findRegistrySkillCandidateByKey(get(), sourceId);
         if (!regSkill) return null;
 
         const check = await get().getRegistrySkillUpdateStatus(regSkill);
@@ -1263,49 +1929,64 @@ export const useSkillStore = create<SkillState>()(
           return { status: check.status, check };
         }
 
-        const installedSkill = check.installedSkill;
-        await window.api.skill.versionCreate(
-          installedSkill.id,
-          `Store update: ${installedSkill.version || "unknown"} -> ${regSkill.version}`,
+        const updatedSkill = await applyRegistrySkillUpdateToInstalledSkill(
+          check.installedSkill,
+          regSkill,
+          check,
+          {
+            notePrefix: "Store update",
+            markAsBuiltin: true,
+            updateSkill: get().updateSkill,
+          },
         );
-        scheduleAllSaveSync("skill:create-version");
-
-        const now = Date.now();
-        const updatedSkill = await get().updateSkill(installedSkill.id, {
-          description: regSkill.description,
-          instructions: check.remoteContent,
-          content: check.remoteContent,
-          version: regSkill.version,
-          author: regSkill.author,
-          source_url: regSkill.source_url,
-          source_id: regSkill.source_id,
-          source_label: regSkill.source_label,
-          source_branch: regSkill.source_branch,
-          source_directory: regSkill.source_directory,
-          canonical_skill_path: regSkill.canonical_skill_path,
-          icon_url: regSkill.icon_url,
-          icon_emoji: regSkill.icon_emoji,
-          icon_background: regSkill.icon_background,
-          category: regSkill.category,
-          is_builtin: true,
-          registry_slug: regSkill.slug,
-          directory_fingerprint: regSkill.directory_fingerprint,
-          content_url: regSkill.content_url,
-          original_tags: regSkill.tags,
-          prerequisites: regSkill.prerequisites,
-          compatibility: regSkill.compatibility,
-          installed_content_hash: check.remoteHash,
-          installed_version: regSkill.version,
-          updated_from_store_at: now,
-        });
-
         if (!updatedSkill) {
           return null;
         }
+        set((state) => ({
+          skills: state.skills.map((skill) =>
+            skill.id === updatedSkill.id ? normalizeSkill(updatedSkill) : skill,
+          ),
+        }));
 
-        if (isLocalRegistrySkill(regSkill)) {
-          await syncLocalRegistrySkillRepo(installedSkill.id, regSkill);
+        return { status: "updated", skill: updatedSkill, check };
+      },
+
+      updateInstalledSkillFromSource: async (skillId, options) => {
+        const check = await get().getInstalledSkillSourceUpdateStatus(skillId);
+        if (!check) {
+          return null;
         }
+        if (!check.installedSkill) {
+          return { status: "not-installed", check };
+        }
+        if (check.status === "up-to-date") {
+          return { status: "up-to-date", check };
+        }
+        if (
+          (check.status === "conflict" || check.status === "local-modified") &&
+          !options?.overwriteLocalChanges
+        ) {
+          return { status: check.status, check };
+        }
+
+        const updatedSkill = await applyRegistrySkillUpdateToInstalledSkill(
+          check.installedSkill,
+          check.registrySkill,
+          check,
+          {
+            notePrefix: "Source update",
+            markAsBuiltin: false,
+            updateSkill: get().updateSkill,
+          },
+        );
+        if (!updatedSkill) {
+          return null;
+        }
+        set((state) => ({
+          skills: state.skills.map((skill) =>
+            skill.id === updatedSkill.id ? normalizeSkill(updatedSkill) : skill,
+          ),
+        }));
 
         return { status: "updated", skill: updatedSkill, check };
       },
@@ -1366,16 +2047,10 @@ export const useSkillStore = create<SkillState>()(
               if (isLocalRegistrySkill(regSkill)) {
                 await syncLocalRegistrySkillRepo(newSkill.id, regSkill);
               } else {
-                await window.api.skill.writeLocalFile(
+                await syncRemoteRegistrySkillRepo(
                   newSkill.id,
-                  "SKILL.md",
+                  regSkill,
                   effectiveContent,
-                  { skipVersionSnapshot: true },
-                );
-                await syncRemoteGitHubSkillRepo(
-                  newSkill.id,
-                  regSkill.source_url,
-                  regSkill.content_url,
                 );
               }
             } catch (repoError) {
@@ -1383,6 +2058,17 @@ export const useSkillStore = create<SkillState>()(
                 `Failed to create local repo for registry skill "${regSkill.slug}":`,
                 repoError,
               );
+              if (shouldCloneRegistrySkillPackage(regSkill)) {
+                await window.api.skill
+                  .delete(newSkill.id)
+                  .catch((deleteError) => {
+                    console.warn(
+                      `Failed to roll back incomplete registry skill "${regSkill.slug}":`,
+                      deleteError,
+                    );
+                  });
+                throw repoError;
+              }
             }
             await get().loadSkills();
             return newSkill;
@@ -1395,16 +2081,17 @@ export const useSkillStore = create<SkillState>()(
 
       installFromRegistry: async (sourceId) => {
         const { installRegistrySkill } = get();
-        const regSkill = getRegistrySkillCandidates(get()).find(
-          (s) => s.source_id === sourceId,
-        );
+        const regSkill = findRegistrySkillCandidateByKey(get(), sourceId);
         if (!regSkill) return null;
         return installRegistrySkill(regSkill);
       },
 
       uninstallRegistrySkill: async (sourceId) => {
         const { skills, loadSkills } = get();
-        const skill = skills.find((s) => s.source_id === sourceId);
+        const regSkill = findRegistrySkillCandidateByKey(get(), sourceId);
+        const skill = regSkill
+          ? findInstalledRegistrySkill(skills, regSkill)
+          : skills.find((s) => s.source_id === sourceId);
         if (!skill) return false;
 
         try {
@@ -1457,12 +2144,7 @@ export const useSkillStore = create<SkillState>()(
         });
       },
 
-      addCustomStoreSource: (
-        name,
-        url,
-        type = "marketplace-json",
-        options,
-      ) => {
+      addCustomStoreSource: (name, url, type = "marketplace-json", options) => {
         const trimmedName = name.trim();
         const normalizedGitSource =
           type === "git-repo"
@@ -1539,19 +2221,15 @@ export const useSkillStore = create<SkillState>()(
       },
 
       getRecommendedSkills: () => {
-        const installedSlugs = get().getInstalledSlugs();
-        return get().registrySkills.filter(
-          (s) => !installedSlugs.includes(s.source_id),
+        const { skills, registrySkills } = get();
+        return registrySkills.filter(
+          (registrySkill) => !findInstalledRegistrySkill(skills, registrySkill),
         );
       },
 
       getFilteredRegistrySkills: () => {
         const { registrySkills, skills, storeCategory, storeSearchQuery } =
           get();
-        const installedSlugs = skills
-          .filter((s) => s.source_id)
-          .map((s) => s.source_id!);
-
         let filtered = registrySkills;
 
         // Category filter
@@ -1570,11 +2248,11 @@ export const useSkillStore = create<SkillState>()(
           );
         }
 
-        const installed = filtered.filter((s) =>
-          installedSlugs.includes(s.source_id),
+        const installed = filtered.filter((registrySkill) =>
+          findInstalledRegistrySkill(skills, registrySkill),
         );
         const recommended = filtered.filter(
-          (s) => !installedSlugs.includes(s.source_id),
+          (registrySkill) => !findInstalledRegistrySkill(skills, registrySkill),
         );
 
         return { installed, recommended };
@@ -1600,6 +2278,7 @@ export const useSkillStore = create<SkillState>()(
 
         // Get AI config from settings store
         const settingsState = useSettingsStore.getState();
+        const { chatCompletion } = await loadSkillTranslationAI();
         const config = resolveScenarioAIConfig({
           aiModels: settingsState.aiModels,
           scenarioModelDefaults: settingsState.scenarioModelDefaults,
@@ -1722,24 +2401,74 @@ Rules:
       partialize: (state) => {
         // Only persist remote store entries that have at least one skill.
         // This prevents caching empty/failed results across sessions.
-        const filteredEntries: typeof state.remoteStoreEntries = {};
-        for (const [key, entry] of Object.entries(state.remoteStoreEntries)) {
-          if (entry.skills.length > 0) {
-            filteredEntries[key] = { ...entry, error: null };
-          }
-        }
+        const filteredEntries = normalizeRemoteStoreEntries(
+          state.remoteStoreEntries,
+          state.customStoreSources,
+        );
         return {
           viewMode: state.viewMode,
+          galleryColumns: state.galleryColumns,
           filterType: state.filterType,
           storeView: state.storeView,
           selectedProjectId: state.selectedProjectId,
           projectScanState: sanitizePersistedProjectScanState(
             state.projectScanState,
           ),
+          agentScanState: sanitizePersistedAgentScanState(state.agentScanState),
           customStoreSources: state.customStoreSources,
           selectedStoreSourceId: state.selectedStoreSourceId,
           remoteStoreEntries: filteredEntries,
           translationCache: pruneTranslationCache(state.translationCache),
+        };
+      },
+      merge: (persistedState, currentState) => {
+        if (!isObjectRecord(persistedState)) {
+          return currentState;
+        }
+
+        const persistedCustomStoreSources = Array.isArray(
+          persistedState.customStoreSources,
+        )
+          ? (persistedState.customStoreSources as SkillStoreSource[])
+          : currentState.customStoreSources;
+
+        const persistedProjectScanState = isObjectRecord(
+          persistedState.projectScanState,
+        )
+          ? (persistedState.projectScanState as Record<
+              string,
+              ProjectSkillScanState
+            >)
+          : currentState.projectScanState;
+        const persistedAgentScanState = isObjectRecord(
+          persistedState.agentScanState,
+        )
+          ? (persistedState.agentScanState as Record<string, AgentSkillScanState>)
+          : currentState.agentScanState;
+        const persistedTranslationCache = isObjectRecord(
+          persistedState.translationCache,
+        )
+          ? (persistedState.translationCache as Record<
+              string,
+              TranslationCacheEntry
+            >)
+          : currentState.translationCache;
+
+        return {
+          ...currentState,
+          ...persistedState,
+          customStoreSources: persistedCustomStoreSources,
+          projectScanState: sanitizePersistedProjectScanState(
+            persistedProjectScanState,
+          ),
+          agentScanState: sanitizePersistedAgentScanState(
+            persistedAgentScanState,
+          ),
+          remoteStoreEntries: normalizeRemoteStoreEntries(
+            persistedState.remoteStoreEntries,
+            persistedCustomStoreSources,
+          ),
+          translationCache: pruneTranslationCache(persistedTranslationCache),
         };
       },
     },

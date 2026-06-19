@@ -3,10 +3,17 @@ import { persist } from "zustand/middleware";
 import type {
   Prompt,
   CreatePromptDTO,
+  CreatePromptRelationDTO,
+  PromptRelation,
   UpdatePromptDTO,
+  UpdatePromptRelationDTO,
 } from "@prompthub/shared/types";
 import * as db from "../services/database";
 import { scheduleAllSaveSync } from "../services/webdav-save-sync";
+import {
+  reconcileDescriptionRelations,
+  MENTION_RELATION_NOTE,
+} from "../components/prompt/prompt-description-relation-sync";
 
 // Sort method
 // 排序方式
@@ -14,12 +21,24 @@ export type SortBy = "updatedAt" | "createdAt" | "title" | "usageCount";
 export type SortOrder = "desc" | "asc";
 // View mode
 // 视图模式
-export type ViewMode = "card" | "list" | "gallery" | "kanban";
+export type ViewMode = "card" | "list" | "gallery" | "kanban" | "graph";
+const VIEW_MODES: readonly ViewMode[] = [
+  "card",
+  "list",
+  "gallery",
+  "kanban",
+  "graph",
+];
 export type GalleryImageSize = "small" | "medium" | "large";
 export type KanbanColumns = 2 | 3 | 4;
 
+function isViewMode(value: unknown): value is ViewMode {
+  return typeof value === "string" && VIEW_MODES.includes(value as ViewMode);
+}
+
 interface PromptState {
   prompts: Prompt[];
+  relations: PromptRelation[];
   selectedId: string | null;
   selectedIds: string[];
   lastSelectedId: string | null;
@@ -42,7 +61,12 @@ interface PromptState {
   fetchPrompts: () => Promise<void>;
   createPrompt: (data: CreatePromptDTO) => Promise<Prompt>;
   updatePrompt: (id: string, data: UpdatePromptDTO) => Promise<void>;
+  fetchRelations: () => Promise<void>;
+  createRelation: (data: CreatePromptRelationDTO) => Promise<PromptRelation>;
+  updateRelation: (id: string, data: UpdatePromptRelationDTO) => Promise<void>;
+  deleteRelation: (id: string) => Promise<void>;
   movePrompts: (ids: string[], folderId: string) => Promise<void>;
+  movePrompt: (promptId: string, newParentId: string | null, newOrder: number) => Promise<void>;
   deletePrompt: (id: string) => Promise<void>;
   selectPrompt: (id: string | null) => void;
   setSelectedIds: (ids: string[]) => void;
@@ -66,6 +90,7 @@ export const usePromptStore = create<PromptState>()(
   persist(
     (set, get) => ({
       prompts: [],
+      relations: [],
       selectedId: null,
       selectedIds: [],
       lastSelectedId: null,
@@ -83,8 +108,11 @@ export const usePromptStore = create<PromptState>()(
         set({ isLoading: true });
         try {
           // Get data from IndexedDB
-          const prompts = await db.getAllPrompts();
-          set({ prompts });
+          const [prompts, relations] = await Promise.all([
+            db.getAllPrompts(),
+            db.listPromptRelations(),
+          ]);
+          set({ prompts, relations });
         } catch (error) {
           console.error("Failed to fetch prompts:", error);
         } finally {
@@ -113,6 +141,35 @@ export const usePromptStore = create<PromptState>()(
           prompts: state.prompts.map((p) => (p.id === id ? updated : p)),
         }));
 
+        // Derive related_to relations from [[id]] mentions in the description,
+        // so @-mentions made anywhere (inline edit, edit modal) stay in sync.
+        if (data.description !== undefined) {
+          const { prompts, relations } = get();
+          const { toCreate, toDelete } = reconcileDescriptionRelations(
+            id,
+            data.description,
+            prompts,
+            relations,
+          );
+          if (toCreate.length > 0 || toDelete.length > 0) {
+            try {
+              await Promise.all([
+                ...toCreate.map((targetPromptId) =>
+                  get().createRelation({
+                    sourcePromptId: id,
+                    targetPromptId,
+                    kind: "related_to",
+                    note: MENTION_RELATION_NOTE,
+                  }),
+                ),
+                ...toDelete.map((relationId) => get().deleteRelation(relationId)),
+              ]);
+            } catch (error) {
+              console.error("Failed to sync description relations:", error);
+            }
+          }
+        }
+
         if (
           data.usageCount === undefined &&
           data.isFavorite === undefined &&
@@ -120,6 +177,43 @@ export const usePromptStore = create<PromptState>()(
         ) {
           scheduleAllSaveSync("prompt:update");
         }
+      },
+
+      fetchRelations: async () => {
+        const relations = await db.listPromptRelations();
+        set({ relations });
+      },
+
+      createRelation: async (data) => {
+        const relation = await db.createPromptRelation(data);
+        set((state) => ({
+          relations: [
+            relation,
+            ...state.relations.filter((item) => item.id !== relation.id),
+          ],
+        }));
+        scheduleAllSaveSync("prompt:relation:create");
+        return relation;
+      },
+
+      updateRelation: async (id, data) => {
+        const relation = await db.updatePromptRelation(id, data);
+        if (!relation) return;
+        set((state) => ({
+          relations: state.relations.map((item) =>
+            item.id === id ? relation : item,
+          ),
+        }));
+        scheduleAllSaveSync("prompt:relation:update");
+      },
+
+      deleteRelation: async (id) => {
+        const deleted = await db.deletePromptRelation(id);
+        if (!deleted) return;
+        set((state) => ({
+          relations: state.relations.filter((item) => item.id !== id),
+        }));
+        scheduleAllSaveSync("prompt:relation:delete");
       },
 
       movePrompts: async (ids, folderId) => {
@@ -134,10 +228,20 @@ export const usePromptStore = create<PromptState>()(
         scheduleAllSaveSync("prompt:move");
       },
 
+      movePrompt: async (promptId, newParentId, newOrder) => {
+        await db.movePrompt(promptId, newParentId, newOrder);
+        await get().fetchPrompts();
+        scheduleAllSaveSync("prompt:move");
+      },
+
       deletePrompt: async (id) => {
         await db.deletePrompt(id);
         set((state) => ({
           prompts: state.prompts.filter((p) => p.id !== id),
+          relations: state.relations.filter(
+            (relation) =>
+              relation.sourcePromptId !== id && relation.targetPromptId !== id,
+          ),
           selectedId: state.selectedId === id ? null : state.selectedId,
           selectedIds: state.selectedIds.filter(
             (selectedId) => selectedId !== id,
@@ -240,6 +344,16 @@ export const usePromptStore = create<PromptState>()(
         promptTypeFilter: state.promptTypeFilter,
         lastSelectedId: state.lastSelectedId,
       }),
+      merge: (persisted, current) => {
+        const persistedState = persisted as Partial<PromptState> | undefined;
+        return {
+          ...current,
+          ...persistedState,
+          viewMode: isViewMode(persistedState?.viewMode)
+            ? persistedState.viewMode
+            : "card",
+        };
+      },
     },
   ),
 );

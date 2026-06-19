@@ -14,7 +14,7 @@ import * as nodeNet from "net";
 const REMOTE_FETCH_TIMEOUT_MS = 30_000;
 /** Total time allowed for reading the response body (protects against slowloris) */
 const REMOTE_FETCH_TRANSFER_TIMEOUT_MS = 60_000;
-const REMOTE_FETCH_MAX_BYTES = 5 * 1024 * 1024;
+const REMOTE_FETCH_MAX_BYTES = 10 * 1024 * 1024;
 const REMOTE_FETCH_MAX_REDIRECTS = 5;
 const REMOTE_FETCH_TRUSTED_HOSTS = new Set([
   "api.github.com",
@@ -22,11 +22,23 @@ const REMOTE_FETCH_TRUSTED_HOSTS = new Set([
   "raw.githubusercontent.com",
   "skills.sh",
   "www.skills.sh",
+  "clawhub.ai",
+  "www.clawhub.ai",
 ]);
 
 interface ResolvedAddress {
   address: string;
   family: 4 | 6;
+}
+
+export interface ResolvePublicAddressOptions {
+  allowPrivateNetwork?: boolean;
+  /**
+   * Allows plain HTTP only after DNS/IP validation proves the target is a
+   * private network address. This is for user-selected LAN Git/Gitea servers,
+   * not for arbitrary public remote content.
+   */
+  allowInsecurePrivateNetworkHttp?: boolean;
 }
 
 // ==================== SSRF protection ====================
@@ -192,7 +204,9 @@ function isTrustedRemoteCompatibilityAddress(address: string): boolean {
   }
 
   const decodedIPv4 = decodeTrustedCompatibilityIPv6(address);
-  return decodedIPv4 !== null && isTrustedRemoteCompatibilityAddress(decodedIPv4);
+  return (
+    decodedIPv4 !== null && isTrustedRemoteCompatibilityAddress(decodedIPv4)
+  );
 }
 
 // ==================== HTTP helpers ====================
@@ -213,6 +227,7 @@ function getSingleHeaderValue(
 
 export async function resolvePublicAddress(
   hostname: string,
+  options: ResolvePublicAddressOptions = {},
 ): Promise<ResolvedAddress> {
   if (isBlockedHostname(hostname)) {
     throw new Error("Access to local network addresses is not allowed");
@@ -220,6 +235,9 @@ export async function resolvePublicAddress(
 
   if (nodeNet.isIP(hostname)) {
     if (isPrivateAddress(hostname)) {
+      if (options.allowPrivateNetwork) {
+        return { address: hostname, family: nodeNet.isIP(hostname) as 4 | 6 };
+      }
       if (
         isTrustedRemoteHostname(hostname) &&
         isTrustedRemoteCompatibilityAddress(hostname)
@@ -251,7 +269,10 @@ export async function resolvePublicAddress(
     };
   }
 
-  if (addresses.some((entry) => isPrivateAddress(entry.address))) {
+  if (
+    !options.allowPrivateNetwork &&
+    addresses.some((entry) => isPrivateAddress(entry.address))
+  ) {
     throw new Error("Access to internal network addresses is not allowed");
   }
 
@@ -280,6 +301,11 @@ export function shouldAttachGithubAuth(hostname: string): boolean {
   return GITHUB_AUTH_HOSTS.has(hostname.toLowerCase());
 }
 
+export function getRemoteFetchMaxBytes(targetUrl: URL): number {
+  void targetUrl;
+  return REMOTE_FETCH_MAX_BYTES;
+}
+
 export interface FetchRemoteTextOptions {
   /**
    * Optional GitHub personal access token. Attached as `Authorization:
@@ -288,6 +314,17 @@ export interface FetchRemoteTextOptions {
    * any other host will drop the token (#108).
    */
   githubToken?: string | null;
+  /**
+   * Default remote fetches block private network addresses to prevent SSRF.
+   * User-selected Git/Gitea repositories may opt in because private/self-hosted
+   * Git servers commonly resolve to RFC1918 addresses.
+   */
+  allowPrivateNetwork?: boolean;
+  /**
+   * HTTP is only allowed for user-selected private Git repositories. Public
+   * remote fetches still require HTTPS.
+   */
+  allowInsecurePrivateNetworkHttp?: boolean;
 }
 
 export interface FetchRemoteBytesOptions extends FetchRemoteTextOptions {}
@@ -302,12 +339,22 @@ export async function fetchRemoteText(
   }
 
   const parsedUrl = new URL(targetUrl);
+  const resolvedAddress = await resolvePublicAddress(parsedUrl.hostname, {
+    allowPrivateNetwork: options.allowPrivateNetwork,
+  });
   if (parsedUrl.protocol !== "https:") {
-    throw new Error("Only HTTPS URLs are allowed");
+    const isAllowedPrivateHttp =
+      parsedUrl.protocol === "http:" &&
+      options.allowInsecurePrivateNetworkHttp === true &&
+      isPrivateAddress(resolvedAddress.address);
+    if (!isAllowedPrivateHttp) {
+      throw new Error(
+        "Only HTTPS URLs are allowed unless a user-selected private Git repository uses HTTP",
+      );
+    }
   }
-
-  const resolvedAddress = await resolvePublicAddress(parsedUrl.hostname);
   const requestModule = getRequestModule(parsedUrl.protocol);
+  const maxBytes = getRemoteFetchMaxBytes(parsedUrl);
 
   const baseHeaders: Record<string, string> = {
     Host: parsedUrl.host,
@@ -394,7 +441,7 @@ export async function fetchRemoteText(
           : Number.parseInt(contentLengthHeader ?? "", 10);
         if (
           Number.isFinite(contentLength) &&
-          contentLength > REMOTE_FETCH_MAX_BYTES
+          contentLength > maxBytes
         ) {
           response.resume();
           reject(new Error("Remote content exceeds size limit"));
@@ -415,7 +462,7 @@ export async function fetchRemoteText(
 
         response.on("data", (chunk: Buffer) => {
           receivedBytes += chunk.length;
-          if (receivedBytes > REMOTE_FETCH_MAX_BYTES) {
+          if (receivedBytes > maxBytes) {
             response.destroy(new Error("Remote content exceeds size limit"));
             return;
           }
@@ -450,17 +497,28 @@ export async function fetchRemoteBytes(
   }
 
   const parsedUrl = new URL(targetUrl);
+  const resolvedAddress = await resolvePublicAddress(parsedUrl.hostname, {
+    allowPrivateNetwork: options.allowPrivateNetwork,
+  });
   if (parsedUrl.protocol !== "https:") {
-    throw new Error("Only HTTPS URLs are allowed");
+    const isAllowedPrivateHttp =
+      parsedUrl.protocol === "http:" &&
+      options.allowInsecurePrivateNetworkHttp === true &&
+      isPrivateAddress(resolvedAddress.address);
+    if (!isAllowedPrivateHttp) {
+      throw new Error(
+        "Only HTTPS URLs are allowed unless a user-selected private Git repository uses HTTP",
+      );
+    }
   }
-
-  const resolvedAddress = await resolvePublicAddress(parsedUrl.hostname);
   const requestModule = getRequestModule(parsedUrl.protocol);
+  const maxBytes = getRemoteFetchMaxBytes(parsedUrl);
 
   const baseHeaders: Record<string, string> = {
     Host: parsedUrl.host,
     "User-Agent": "PromptHub/remote-skill-fetch",
-    Accept: "application/octet-stream, application/json;q=0.9, text/plain;q=0.8, */*;q=0.1",
+    Accept:
+      "application/octet-stream, application/json;q=0.9, text/plain;q=0.8, */*;q=0.1",
   };
 
   if (options.githubToken && shouldAttachGithubAuth(parsedUrl.hostname)) {
@@ -538,7 +596,7 @@ export async function fetchRemoteBytes(
           : Number.parseInt(contentLengthHeader ?? "", 10);
         if (
           Number.isFinite(contentLength) &&
-          contentLength > REMOTE_FETCH_MAX_BYTES
+          contentLength > maxBytes
         ) {
           response.resume();
           reject(new Error("Remote content exceeds size limit"));
@@ -558,7 +616,7 @@ export async function fetchRemoteBytes(
 
         response.on("data", (chunk: Buffer) => {
           receivedBytes += chunk.length;
-          if (receivedBytes > REMOTE_FETCH_MAX_BYTES) {
+          if (receivedBytes > maxBytes) {
             response.destroy(new Error("Remote content exceeds size limit"));
             return;
           }

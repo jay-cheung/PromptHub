@@ -28,10 +28,16 @@ vi.mock("../../../src/renderer/stores/folder.store", async () => {
   };
 });
 
-vi.mock("../../../src/renderer/stores/settings.store", () => ({
-  useSettingsStore: (selector: (state: Record<string, unknown>) => unknown) =>
-    useSettingsStoreMock(selector),
-}));
+vi.mock("../../../src/renderer/stores/settings.store", async () => {
+  const actual = await vi.importActual(
+    "../../../src/renderer/stores/settings.store",
+  );
+  return {
+    ...(actual as Record<string, unknown>),
+    useSettingsStore: (selector: (state: Record<string, unknown>) => unknown) =>
+      useSettingsStoreMock(selector),
+  };
+});
 
 vi.mock("../../../src/renderer/stores/ui.store", () => ({
   useUIStore: (selector: (state: Record<string, unknown>) => unknown) =>
@@ -128,6 +134,19 @@ function createSettingsState(overrides?: Record<string, unknown>) {
   };
 }
 
+function hasHiddenSvgAncestor(element: Element): boolean {
+  let current: Element | null = element;
+
+  while (current) {
+    if (current.getAttribute("aria-hidden") === "true") {
+      return true;
+    }
+    current = current.parentElement;
+  }
+
+  return false;
+}
+
 describe("MainContent inline edit integration", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -154,6 +173,7 @@ describe("MainContent inline edit integration", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.clearAllMocks();
   });
 
@@ -186,7 +206,6 @@ describe("MainContent inline edit integration", () => {
 
     await waitFor(() => {
       expect(promptState.updatePrompt).toHaveBeenCalledWith("prompt-1", {
-        systemPrompt: "System text",
         title: "Updated Title",
         userPrompt: "Updated user prompt",
       });
@@ -194,6 +213,173 @@ describe("MainContent inline edit integration", () => {
 
     expect(showToast).toHaveBeenCalledWith("Saved successfully", "success");
   });
+
+  it("saves a changed title when Enter is pressed in the detail title field", async () => {
+    const promptState = createPromptState(createPrompt());
+
+    usePromptStoreMock.mockImplementation((selector) => selector(promptState));
+
+    await act(async () => {
+      await renderWithI18n(<MainContent />, { language: "en" });
+    });
+
+    fireEvent.doubleClick(
+      screen.getByRole("heading", { name: "Original Title", level: 2 }),
+    );
+
+    const titleInput = screen.getByRole("textbox", { name: "Title" });
+    fireEvent.change(titleInput, { target: { value: "Enter Saved Title" } });
+    fireEvent.keyDown(titleInput, { key: "Enter" });
+
+    await waitFor(() => {
+      expect(promptState.updatePrompt).toHaveBeenCalledWith("prompt-1", {
+        title: "Enter Saved Title",
+      });
+    });
+  });
+
+  it("adds a description from the empty detail description area and saves on Enter", async () => {
+    const promptState = createPromptState(
+      createPrompt({ description: undefined }),
+    );
+
+    usePromptStoreMock.mockImplementation((selector) => selector(promptState));
+
+    await act(async () => {
+      await renderWithI18n(<MainContent />, { language: "en" });
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Add description" }));
+
+    const descriptionInput = screen.getByRole("textbox", {
+      name: "Description",
+    });
+    fireEvent.change(descriptionInput, {
+      target: { value: "A searchable usage note" },
+    });
+    fireEvent.keyDown(descriptionInput, { key: "Enter" });
+
+    await waitFor(() => {
+      expect(promptState.updatePrompt).toHaveBeenCalledWith("prompt-1", {
+        description: "A searchable usage note",
+      });
+    });
+  });
+
+  it(
+    "changes the selected prompt folder from the detail metadata row",
+    async () => {
+      const promptState = createPromptState(
+        createPrompt({ folderId: "folder-a" }),
+      );
+
+      usePromptStoreMock.mockImplementation((selector) => selector(promptState));
+      useFolderStoreMock.mockImplementation((selector) =>
+        selector({
+          selectedFolderId: null,
+          unlockedFolderIds: new Set<string>(),
+          folders: [
+            {
+              id: "folder-a",
+              name: "Folder A",
+              order: 0,
+              icon: "",
+              createdAt: "",
+              updatedAt: "",
+            },
+            {
+              id: "folder-b",
+              name: "Folder B",
+              order: 1,
+              icon: "",
+              createdAt: "",
+              updatedAt: "",
+            },
+          ],
+        }),
+      );
+
+      await act(async () => {
+        await renderWithI18n(<MainContent />, { language: "en" });
+      });
+
+      expect(
+        screen.queryByRole("combobox", { name: "Folder (Optional)" }),
+      ).not.toBeInTheDocument();
+
+      fireEvent.click(
+        screen.getByRole("button", { name: "Folder (Optional)" }),
+      );
+      fireEvent.click(await screen.findByText("Folder B"));
+
+      await waitFor(() => {
+        expect(promptState.updatePrompt).toHaveBeenCalledWith("prompt-1", {
+          folderId: "folder-b",
+        });
+      });
+    },
+    60_000,
+  );
+
+  it(
+    "allows changing the detail folder while inline editing",
+    async () => {
+      const promptState = createPromptState(
+        createPrompt({ folderId: "folder-a" }),
+      );
+
+      usePromptStoreMock.mockImplementation((selector) => selector(promptState));
+      useFolderStoreMock.mockImplementation((selector) =>
+        selector({
+          selectedFolderId: null,
+          unlockedFolderIds: new Set<string>(),
+          folders: [
+            {
+              id: "folder-a",
+              name: "Folder A",
+              order: 0,
+              icon: "",
+              createdAt: "",
+              updatedAt: "",
+            },
+            {
+              id: "folder-b",
+              name: "Folder B",
+              order: 1,
+              icon: "",
+              createdAt: "",
+              updatedAt: "",
+            },
+          ],
+        }),
+      );
+
+      await act(async () => {
+        await renderWithI18n(<MainContent />, { language: "en" });
+      });
+
+      fireEvent.doubleClick(
+        screen.getByRole("heading", { name: "Original Title", level: 2 }),
+      );
+
+      expect(screen.getByRole("textbox", { name: "Title" })).toBeInTheDocument();
+
+      const folderButton = screen.getByRole("button", {
+        name: "Folder (Optional)",
+      });
+      expect(folderButton).not.toBeDisabled();
+
+      fireEvent.click(folderButton);
+      fireEvent.click(await screen.findByText("Folder B"));
+
+      await waitFor(() => {
+        expect(promptState.updatePrompt).toHaveBeenCalledWith("prompt-1", {
+          folderId: "folder-b",
+        });
+      });
+    },
+    60_000,
+  );
 
   it("discards inline draft changes on cancel", async () => {
     const promptState = createPromptState(createPrompt());
@@ -276,16 +462,96 @@ describe("MainContent inline edit integration", () => {
     );
 
     expect(screen.getByRole("textbox", { name: "Title" }).className).toContain(
-      "bg-transparent",
+      "bg-card",
+    );
+    expect(screen.getByRole("textbox", { name: "Title" }).className).toContain(
+      "h-10",
     );
     expect(
       screen.getByRole("textbox", { name: "User Prompt" }).className,
-    ).toContain("bg-transparent");
+    ).toContain("bg-card");
+    expect(
+      screen.getByRole("textbox", { name: "User Prompt" }).className,
+    ).toContain("rounded-xl");
     expect(
       screen.getByRole("textbox", { name: "User Prompt" }).className,
     ).not.toContain("font-mono");
     expect(screen.getByRole("button", { name: "Show Plain Text" })).toBeDisabled();
     expect(screen.getByRole("button", { name: /Run Comparison/i })).toBeDisabled();
+  });
+
+  it("keeps selected prompt detail actions from submitting surrounding forms", async () => {
+    const promptState = createPromptState(
+      createPrompt({
+        systemPromptEn: "English system text",
+        userPromptEn: "English user prompt",
+      }),
+    );
+    const handleSubmit = vi.fn();
+
+    usePromptStoreMock.mockImplementation((selector) => selector(promptState));
+    useSettingsStoreMock.mockImplementation((selector) =>
+      selector(
+        createSettingsState({
+          aiModels: [
+            {
+              id: "m1",
+              provider: "openai",
+              apiProtocol: "openai",
+              apiKey: "test-key",
+              apiUrl: "https://example.invalid/v1",
+              model: "gpt-4o",
+              enabled: true,
+              type: "chat",
+            },
+          ],
+        }),
+      ),
+    );
+
+    const { container } = await renderWithI18n(
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          handleSubmit();
+        }}
+      >
+        <MainContent />
+      </form>,
+      { language: "zh" },
+    );
+
+    const form = container.querySelector("form");
+
+    expect(form).not.toBeNull();
+
+    const buttons = Array.from(form?.querySelectorAll("button") ?? []);
+    const implicitButtons = buttons.filter(
+      (button) => button.getAttribute("type") !== "button",
+    );
+    const exposedButtonIcons = buttons
+      .flatMap((button) => Array.from(button.querySelectorAll("svg")))
+      .filter((icon) => !hasHiddenSvgAncestor(icon));
+
+    const implicitButtonMarkup = implicitButtons.map(
+      (button) => button.outerHTML,
+    );
+
+    expect(implicitButtonMarkup, implicitButtonMarkup.join("\n")).toHaveLength(
+      0,
+    );
+    const exposedButtonIconMarkup = exposedButtonIcons.map(
+      (icon) => icon.outerHTML,
+    );
+
+    expect(
+      exposedButtonIconMarkup,
+      exposedButtonIconMarkup.join("\n"),
+    ).toHaveLength(0);
+
+    fireEvent.click(buttons[0]);
+
+    expect(handleSubmit).not.toHaveBeenCalled();
   });
 
   it("renders selected prompt tags without runtime icon errors", async () => {
@@ -301,6 +567,23 @@ describe("MainContent inline edit integration", () => {
 
     expect(screen.getByText("tag-a")).toBeInTheDocument();
     expect(screen.getByText("tag-b")).toBeInTheDocument();
+  });
+
+  it("shows a real empty-state hint when the selected prompt has no tags", async () => {
+    const promptState = createPromptState(createPrompt({ tags: [] }));
+
+    usePromptStoreMock.mockImplementation((selector) => selector(promptState));
+
+    await act(async () => {
+      await renderWithI18n(<MainContent />, { language: "en" });
+    });
+
+    expect(
+      screen.getByText(
+        "No tags yet. Edit this Prompt or drag tags from the sidebar.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Select existing tags:")).not.toBeInTheDocument();
   });
 
   it(
@@ -382,7 +665,8 @@ describe("MainContent inline edit integration", () => {
     };
 
     expect(dropzone.className).toContain("border-transparent");
-    expect(dropzone.className).toContain("px-1.5");
+    expect(dropzone.className).not.toContain("px-1.5");
+    expect(dropzone.className).toContain("pr-1.5");
     expect(dropzone.className).toContain("py-1.5");
 
     fireEvent.dragOver(dropzone, { dataTransfer });
@@ -390,6 +674,38 @@ describe("MainContent inline edit integration", () => {
     expect(dropzone.className).toContain("border-primary/25");
     expect(dropzone.className).toContain("bg-primary/6");
     expect(dropzone.className).toContain("shadow-[0_0_0_1px_rgba(59,130,246,0.18)]");
+  });
+
+  it("clears copied feedback timers when unmounted after copying", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue(undefined);
+    const setTimeoutSpy = vi.spyOn(window, "setTimeout");
+    const clearTimeoutSpy = vi.spyOn(window, "clearTimeout");
+    const promptState = createPromptState(createPrompt());
+
+    usePromptStoreMock.mockImplementation((selector) => selector(promptState));
+
+    const { unmount } = await renderWithI18n(<MainContent />, {
+      language: "en",
+    });
+
+    await act(async () => {
+      const copyButtons = screen.getAllByRole("button", {
+        name: "Copy Prompt",
+      });
+      fireEvent.click(copyButtons[copyButtons.length - 1]);
+      await Promise.resolve();
+    });
+
+    expect(navigator.clipboard.writeText).toHaveBeenCalledWith(
+      "Original user prompt",
+    );
+    expect(setTimeoutSpy).toHaveBeenCalledWith(expect.any(Function), 2000);
+
+    clearTimeoutSpy.mockClear();
+    unmount();
+
+    expect(clearTimeoutSpy).toHaveBeenCalledWith(expect.anything());
   });
 
 });

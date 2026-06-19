@@ -1,16 +1,27 @@
-import { useCallback, useEffect, useRef, useState, lazy, Suspense } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  lazy,
+  Suspense,
+} from "react";
 import type { RecoveryCandidate } from "@prompthub/shared/types";
 import { Sidebar, TopBar, MainContent, TitleBar } from "./components/layout";
 import { usePromptStore } from "./stores/prompt.store";
 import { useFolderStore } from "./stores/folder.store";
 import { useSettingsStore } from "./stores/settings.store";
+import { useUIStore } from "./stores/ui.store";
 import {
   getRenderedBackgroundImageBlur,
   getRenderedBackgroundImageOpacity,
   loadSettingsFromMainProcess,
 } from "./stores/settings.store";
-import { initDatabase, migrateLegacyIndexedDbToMainProcess } from "./services/database";
-import { ImportedPromptData } from "./components/prompt/ImportPromptModal";
+import {
+  initDatabase,
+  migrateLegacyIndexedDbToMainProcess,
+} from "./services/database";
+import type { ImportedPromptData } from "./components/prompt/ImportPromptModal";
 import {
   runS3AutoSync,
   runSelfHostedAutoSync as executeSelfHostedAutoSync,
@@ -28,16 +39,17 @@ import {
   shouldRunStartupSelfHostedSync,
   shouldRunStartupWebDAVSync,
 } from "./services/app-background";
+import { registerPeriodicAutoSyncController } from "./services/periodic-auto-sync";
 import { useToast } from "./components/ui/Toast";
-import { DndContext, DragEndEvent, pointerWithin } from "@dnd-kit/core";
+import { DndContext, pointerWithin, type DragEndEvent } from "@dnd-kit/core";
 import i18n from "./i18n";
-import { UpdateDialog, UpdateStatus } from "./components/UpdateDialog";
-import { CloseDialog } from "./components/ui/CloseDialog";
-import { DataRecoveryDialog } from "./components/ui/DataRecoveryDialog";
+import { useTranslation } from "react-i18next";
+import type { UpdateStatus } from "./components/UpdateDialog";
 import { BackgroundImageBackdrop } from "./components/ui/BackgroundImageBackdrop";
-import { BackupImportConfirmDialog } from "./components/settings/BackupImportConfirmDialog";
+import { Spinner } from "./components/ui/Spinner";
 import { isWebRuntime } from "./runtime";
 import { useBackupImportController } from "./hooks/useBackupImportController";
+import { waitForPersistHydration } from "./utils/persist-hydration";
 
 // Lazy load heavy components for better initial load performance
 // 懒加载大型组件以提升初始加载性能
@@ -46,9 +58,29 @@ const SettingsPage = lazy(() =>
     default: m.SettingsPage,
   })),
 );
+const UpdateDialog = lazy(() =>
+  import("./components/UpdateDialog").then((m) => ({
+    default: m.UpdateDialog,
+  })),
+);
 const EditPromptModal = lazy(() =>
   import("./components/prompt/EditPromptModal").then((m) => ({
     default: m.EditPromptModal,
+  })),
+);
+const CloseDialog = lazy(() =>
+  import("./components/ui/CloseDialog").then((m) => ({
+    default: m.CloseDialog,
+  })),
+);
+const DataRecoveryDialog = lazy(() =>
+  import("./components/ui/DataRecoveryDialog").then((m) => ({
+    default: m.DataRecoveryDialog,
+  })),
+);
+const BackupImportConfirmDialog = lazy(() =>
+  import("./components/settings/BackupImportConfirmDialog").then((m) => ({
+    default: m.BackupImportConfirmDialog,
   })),
 );
 // Page type
@@ -56,6 +88,7 @@ const EditPromptModal = lazy(() =>
 type PageType = "home" | "settings";
 
 function App() {
+  const { t } = useTranslation();
   const fetchPrompts = usePromptStore((state) => state.fetchPrompts);
   const fetchFolders = useFolderStore((state) => state.fetchFolders);
   const folders = useFolderStore((state) => state.folders);
@@ -63,7 +96,9 @@ function App() {
   const movePrompts = usePromptStore((state) => state.movePrompts);
   const selectedIds = usePromptStore((state) => state.selectedIds);
   const applyTheme = useSettingsStore((state) => state.applyTheme);
-  const inferUpdateChannel = useSettingsStore((state) => state.inferUpdateChannel);
+  const inferUpdateChannel = useSettingsStore(
+    (state) => state.inferUpdateChannel,
+  );
   const backgroundImageFileName = useSettingsStore(
     (state) => state.backgroundImageFileName,
   );
@@ -78,6 +113,9 @@ function App() {
   );
   const debugMode = useSettingsStore((state) => state.debugMode);
   const shortcutModes = useSettingsStore((state) => state.shortcutModes);
+  const pendingSettingsSection = useUIStore(
+    (state) => state.pendingSettingsSection,
+  );
   const [currentPage, setCurrentPage] = useState<PageType>("home");
   const [isLoading, setIsLoading] = useState(true);
   const { showToast } = useToast();
@@ -101,6 +139,12 @@ function App() {
   // OS-level fullscreen state (synced from main process events)
   // OS 级全屏状态（通过主进程事件同步）
   const [isOsFullscreen, setIsOsFullscreen] = useState(false);
+
+  useEffect(() => {
+    if (pendingSettingsSection) {
+      setCurrentPage("settings");
+    }
+  }, [pendingSettingsSection]);
 
   // Update state
   const [showUpdateDialog, setShowUpdateDialog] = useState(false);
@@ -144,7 +188,8 @@ function App() {
     !isWebRuntime() &&
     backgroundImageEnabled &&
     typeof normalizedBackgroundImageFileName === "string";
-  const renderedBackgroundBlur = getRenderedBackgroundImageBlur(backgroundImageBlur);
+  const renderedBackgroundBlur =
+    getRenderedBackgroundImageBlur(backgroundImageBlur);
   const renderedBackgroundImageOpacity = getRenderedBackgroundImageOpacity(
     backgroundImageOpacity,
   );
@@ -501,10 +546,14 @@ function App() {
       await movePrompts(promptsToMove, folderId);
 
       const count = promptsToMove.length;
+      const folderName = folder?.name || i18n.t("folder.uncategorized");
       showToast(
         count > 1
-          ? `已将 ${count} 个 Prompt 移动到「${folder?.name || "文件夹"}」`
-          : `已移动到「${folder?.name || "文件夹"}」`,
+          ? i18n.t("toast.movedPromptsToFolder", {
+              count,
+              folder: folderName,
+            })
+          : i18n.t("toast.movedPromptToFolder", { folder: folderName }),
         "success",
       );
     }
@@ -576,46 +625,25 @@ function App() {
     // Initialize database, then load data
     // 初始化数据库，然后加载数据
     let startupSyncTimer: NodeJS.Timeout | null = null;
-    let intervalId: NodeJS.Timeout | null = null;
     let s3StartupSyncTimer: NodeJS.Timeout | null = null;
-    let s3IntervalId: NodeJS.Timeout | null = null;
     let selfHostedStartupSyncTimer: NodeJS.Timeout | null = null;
-    let selfHostedIntervalId: NodeJS.Timeout | null = null;
+    let disposePeriodicAutoSync: (() => void) | null = null;
     let disposed = false;
-
-    interface PersistController {
-      hasHydrated?: () => boolean;
-      onFinishHydration?: (callback: () => void) => () => void;
-    }
 
     const waitForSettingsHydration = async (): Promise<void> => {
       const persistController = (
         useSettingsStore as typeof useSettingsStore & {
-          persist?: PersistController;
+          persist?: Parameters<typeof waitForPersistHydration>[0];
         }
       ).persist;
 
-      if (!persistController || persistController.hasHydrated?.()) {
-        return;
+      await waitForPersistHydration(persistController);
+    };
+
+    const logWhenDebugEnabled = (...args: Parameters<typeof console.log>) => {
+      if (useSettingsStore.getState().debugMode) {
+        console.log(...args);
       }
-
-      await new Promise<void>((resolve) => {
-        let finished = false;
-        let unsubscribe: (() => void) | undefined;
-
-        const finish = () => {
-          if (finished) {
-            return;
-          }
-          finished = true;
-          unsubscribe?.();
-          clearTimeout(timeoutId);
-          resolve();
-        };
-
-        unsubscribe = persistController.onFinishHydration?.(finish);
-        const timeoutId = setTimeout(finish, 500);
-      });
     };
 
     const runAutoSync = async (
@@ -648,31 +676,29 @@ function App() {
       isWebDAVSyncInFlightRef.current = true;
 
       try {
-        const result = await runWebDAVAutoSync(
-          {
-            config: {
-              url: settings.webdavUrl,
-              username: settings.webdavUsername,
-              password: settings.webdavPassword,
-            },
-            options: {
-              includeImages: settings.webdavIncludeImages,
-              incrementalSync: settings.webdavIncrementalSync,
-              encryptionPassword:
-                settings.webdavEncryptionEnabled &&
-                settings.webdavEncryptionPassword
-                  ? settings.webdavEncryptionPassword
-                  : undefined,
-            },
+        const result = await runWebDAVAutoSync({
+          config: {
+            url: settings.webdavUrl,
+            username: settings.webdavUsername,
+            password: settings.webdavPassword,
           },
-        );
+          options: {
+            includeImages: settings.webdavIncludeImages,
+            incrementalSync: settings.webdavIncrementalSync,
+            encryptionPassword:
+              settings.webdavEncryptionEnabled &&
+              settings.webdavEncryptionPassword
+                ? settings.webdavEncryptionPassword
+                : undefined,
+          },
+        });
 
         if (!result.success) {
-          console.log(`⚠️ ${reason} sync failed:`, result.message);
+          console.error(`⚠️ ${reason} sync failed:`, result.message);
           return;
         }
 
-        console.log(`✅ ${reason} sync completed:`, result.message);
+        logWhenDebugEnabled(`✅ ${reason} sync completed:`, result.message);
         if (result.localChanged) {
           await Promise.all([fetchPrompts(), fetchFolders()]);
         }
@@ -765,7 +791,7 @@ function App() {
           return;
         }
 
-        console.log(`✅ S3 ${reason} sync completed:`, result.message);
+        logWhenDebugEnabled(`✅ S3 ${reason} sync completed:`, result.message);
         if (result.localChanged) {
           await Promise.all([fetchPrompts(), fetchFolders()]);
         }
@@ -817,7 +843,7 @@ function App() {
           return;
         }
 
-        console.log(`✅ ${result.message}`);
+        logWhenDebugEnabled(`✅ ${result.message}`);
         if (result.localChanged) {
           await Promise.all([fetchPrompts(), fetchFolders()]);
         }
@@ -841,14 +867,14 @@ function App() {
         if (!isWebRuntime()) {
           const migration = await migrateLegacyIndexedDbToMainProcess();
           if (migration.migrated) {
-            console.log(
+            logWhenDebugEnabled(
               `Migrated legacy IndexedDB data to SQLite (${migration.promptCount} prompts, ${migration.folderCount} folders, ${migration.versionCount} versions)`,
             );
           }
         }
         await fetchPrompts();
         await fetchFolders();
-        console.log("✅ App initialized");
+        logWhenDebugEnabled("✅ App initialized");
 
         // IMPORTANT: We MUST NOT auto-execute performRecovery here. Historically
         // this code auto-picked the best candidate and called performRecovery
@@ -880,7 +906,7 @@ function App() {
           error instanceof Error &&
           error.message.includes("timeout")
         ) {
-          console.log("🔄 Retrying database initialization...");
+          logWhenDebugEnabled("🔄 Retrying database initialization...");
           await new Promise((resolve) => setTimeout(resolve, 500));
           clearTimeout(maxLoadingTime);
           return init(retryCount + 1);
@@ -899,7 +925,7 @@ function App() {
         hasValidWebDAVConfig(settings)
       ) {
         const delay = (settings.webdavSyncOnStartupDelay ?? 10) * 1000;
-        console.log(`🔄 Will sync with WebDAV in ${delay / 1000}s...`);
+        logWhenDebugEnabled(`🔄 Will sync with WebDAV in ${delay / 1000}s...`);
         startupSyncTimer = setTimeout(() => {
           if (!isWindowVisibleRef.current || navigator.onLine === false) {
             pendingStartupSyncRef.current = true;
@@ -915,7 +941,7 @@ function App() {
         hasValidS3Config(settings)
       ) {
         const delay = (settings.s3SyncOnStartupDelay ?? 10) * 1000;
-        console.log(`🔄 Will sync with S3 in ${delay / 1000}s...`);
+        logWhenDebugEnabled(`🔄 Will sync with S3 in ${delay / 1000}s...`);
         s3StartupSyncTimer = setTimeout(() => {
           if (!isWindowVisibleRef.current || navigator.onLine === false) {
             pendingS3StartupSyncRef.current = true;
@@ -931,7 +957,7 @@ function App() {
         hasValidSelfHostedConfig(settings)
       ) {
         const delay = (settings.selfHostedSyncOnStartupDelay ?? 10) * 1000;
-        console.log(
+        logWhenDebugEnabled(
           `🔄 Will sync with self-hosted PromptHub in ${delay / 1000}s...`,
         );
         selfHostedStartupSyncTimer = setTimeout(() => {
@@ -967,48 +993,20 @@ function App() {
         return;
       }
 
-      // Periodic auto sync
-      // 定时自动同步
-      const settings = useSettingsStore.getState();
-      if (
-        settings.syncProvider === "webdav" &&
-        settings.webdavAutoSyncInterval > 0 &&
-        hasValidWebDAVConfig(settings)
-      ) {
-        const intervalMs = settings.webdavAutoSyncInterval * 60 * 1000;
-        console.log(
-          `🔄 Auto sync interval: ${settings.webdavAutoSyncInterval} minutes`,
-        );
-        intervalId = setInterval(() => {
+      disposePeriodicAutoSync = registerPeriodicAutoSyncController({
+        getSettings: useSettingsStore.getState,
+        subscribe: useSettingsStore.subscribe,
+        runWebDAV: () => {
           void runAutoSync("interval");
-        }, intervalMs);
-      }
-
-      if (
-        settings.syncProvider === "s3" &&
-        settings.s3AutoSyncInterval > 0 &&
-        hasValidS3Config(settings)
-      ) {
-        const intervalMs = settings.s3AutoSyncInterval * 60 * 1000;
-        console.log(`🔄 S3 auto sync interval: ${settings.s3AutoSyncInterval} minutes`);
-        s3IntervalId = setInterval(() => {
+        },
+        runS3: () => {
           void runS3AutoSyncTask("interval");
-        }, intervalMs);
-      }
-
-      if (
-        settings.syncProvider === "self-hosted" &&
-        settings.selfHostedAutoSyncInterval > 0 &&
-        hasValidSelfHostedConfig(settings)
-      ) {
-        const intervalMs = settings.selfHostedAutoSyncInterval * 60 * 1000;
-        console.log(
-          `🔄 Self-hosted auto sync interval: ${settings.selfHostedAutoSyncInterval} minutes`,
-        );
-        selfHostedIntervalId = setInterval(() => {
+        },
+        runSelfHosted: () => {
           void runSelfHostedAutoSync("interval");
-        }, intervalMs);
-      }
+        },
+        log: (message) => logWhenDebugEnabled(`🔄 ${message}`),
+      }).dispose;
 
       document.addEventListener("visibilitychange", handleBackgroundTaskResume);
       window.api?.on?.("window:visibility-changed", handleBackgroundTaskResume);
@@ -1019,11 +1017,9 @@ function App() {
     return () => {
       disposed = true;
       if (startupSyncTimer) clearTimeout(startupSyncTimer);
-      if (intervalId) clearInterval(intervalId);
       if (s3StartupSyncTimer) clearTimeout(s3StartupSyncTimer);
-      if (s3IntervalId) clearInterval(s3IntervalId);
       if (selfHostedStartupSyncTimer) clearTimeout(selfHostedStartupSyncTimer);
-      if (selfHostedIntervalId) clearInterval(selfHostedIntervalId);
+      disposePeriodicAutoSync?.();
       document.removeEventListener(
         "visibilitychange",
         handleBackgroundTaskResume,
@@ -1041,8 +1037,10 @@ function App() {
     return (
       <div className="flex h-screen items-center justify-center bg-background">
         <div className="flex flex-col items-center gap-3">
-          <div className="w-8 h-8 border-2 border-primary border-t-transparent rounded-full animate-spin" />
-          <div className="text-muted-foreground text-sm">Loading...</div>
+          <Spinner size="lg" />
+          <div className="text-muted-foreground text-sm">
+            {t("common.loading")}
+          </div>
         </div>
       </div>
     );
@@ -1058,7 +1056,7 @@ function App() {
         {hasBackgroundImage ? (
           <BackgroundImageBackdrop
             src={normalizedBackgroundImageFileName!}
-            alt="App background"
+            alt=""
             opacity={renderedBackgroundImageOpacity}
             blur={renderedBackgroundBlur}
           />
@@ -1089,11 +1087,11 @@ function App() {
 
               <div className="flex min-h-0 flex-1 overflow-hidden">
                 {currentPage === "home" ? (
-                    <Sidebar
-                      currentPage={currentPage}
-                      onNavigate={setCurrentPage}
-                      layout="panel"
-                    />
+                  <Sidebar
+                    currentPage={currentPage}
+                    onNavigate={setCurrentPage}
+                    layout="panel"
+                  />
                 ) : null}
 
                 <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
@@ -1105,7 +1103,7 @@ function App() {
                     <Suspense
                       fallback={
                         <div className="flex-1 flex items-center justify-center">
-                          <div className="w-6 h-6 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+                          <Spinner />
                         </div>
                       }
                     >
@@ -1120,34 +1118,50 @@ function App() {
             </div>
           </div>
 
-          <UpdateDialog
-            isOpen={showUpdateDialog}
-            onClose={() => setShowUpdateDialog(false)}
-            initialStatus={initialUpdateStatus}
-          />
+          {showUpdateDialog ? (
+            <Suspense fallback={null}>
+              <UpdateDialog
+                isOpen={showUpdateDialog}
+                onClose={() => setShowUpdateDialog(false)}
+                initialStatus={initialUpdateStatus}
+              />
+            </Suspense>
+          ) : null}
 
           {/* Windows close dialog */}
           {/* Windows 关闭对话框 */}
-          <CloseDialog
-            isOpen={showCloseDialog}
-            onClose={() => setShowCloseDialog(false)}
-          />
+          {showCloseDialog ? (
+            <Suspense fallback={null}>
+              <CloseDialog
+                isOpen={showCloseDialog}
+                onClose={() => setShowCloseDialog(false)}
+              />
+            </Suspense>
+          ) : null}
 
           {/* Data recovery dialog */}
-          <DataRecoveryDialog
-            isOpen={showRecoveryDialog}
-            onClose={() => setShowRecoveryDialog(false)}
-            databases={recoverableDatabases}
-          />
+          {showRecoveryDialog ? (
+            <Suspense fallback={null}>
+              <DataRecoveryDialog
+                isOpen={showRecoveryDialog}
+                onClose={() => setShowRecoveryDialog(false)}
+                databases={recoverableDatabases}
+              />
+            </Suspense>
+          ) : null}
 
-          <BackupImportConfirmDialog
-            importPreview={backupImportController.importPreview}
-            confirmingImport={backupImportController.confirmingImport}
-            onClose={backupImportController.closeImportPreview}
-            onConfirm={() => {
-              void backupImportController.confirmImport();
-            }}
-          />
+          {backupImportController.importPreview ? (
+            <Suspense fallback={null}>
+              <BackupImportConfirmDialog
+                importPreview={backupImportController.importPreview}
+                confirmingImport={backupImportController.confirmingImport}
+                onClose={backupImportController.closeImportPreview}
+                onConfirm={() => {
+                  void backupImportController.confirmImport();
+                }}
+              />
+            </Suspense>
+          ) : null}
 
           {/* Use EditPromptModal for importing, passing clipboard data as initialData */}
           {showImportModal && (

@@ -1,6 +1,7 @@
-import type { AIProtocol } from './ai';
+import type { AIProtocol } from "./ai";
+import type { SkillPlatform } from "../constants/platforms";
 
-export type SkillVisibility = 'private' | 'shared';
+export type SkillVisibility = "private" | "shared";
 
 export interface Skill {
   id: string;
@@ -151,6 +152,12 @@ export interface MarketplaceSkillEntry {
   skillUrl?: string;
   raw_url?: string;
   rawUrl?: string;
+  package_url?: string;
+  packageUrl?: string;
+  zip_url?: string;
+  zipUrl?: string;
+  download_url?: string;
+  downloadUrl?: string;
   content?: string;
   tags?: string[];
   version?: string | number;
@@ -201,6 +208,7 @@ export interface RegistrySkill {
   version: string;
   content: string; // Embedded SKILL.md content
   content_url?: string; // Remote SKILL.md URL (for updates)
+  package_url?: string; // Remote package archive URL (for full-directory installs)
   prerequisites?: string[];
   compatibility?: string[];
   weekly_installs?: string;
@@ -263,6 +271,9 @@ export interface SkillLocalFileEntry {
   path: string;
   content: string;
   isDirectory: boolean;
+  mimeType?: string;
+  encoding?: "text" | "data-url" | "placeholder";
+  previewKind?: "image" | "audio" | "video" | "pdf";
 }
 
 export interface SkillLocalFileBufferEntry {
@@ -286,6 +297,30 @@ export interface SkillPlatformInstallResult {
   requestedMode: SkillInstallMode;
   effectiveMode: SkillInstallMode;
   fallbackReason?: string;
+}
+
+export interface SkillPlatformInstallStatus {
+  installed: boolean;
+  mode?: SkillInstallMode;
+}
+
+export type SkillPlatformInstallStatusMap = Record<
+  string,
+  SkillPlatformInstallStatus
+>;
+
+export interface SkillDeleteOptions {
+  /**
+   * Symlink distributions are always removed because they point back to the
+   * PromptHub-managed source. Copy distributions can be preserved as detached
+   * snapshots when this is false.
+   */
+  removeCopyInstallations?: boolean;
+}
+
+export interface SkillLocalPathStatus {
+  exists: boolean;
+  mode?: SkillInstallMode;
 }
 
 /**
@@ -377,6 +412,12 @@ export interface ScannedSkill {
   filePath: string;
   /** Parent directory of the SKILL.md file (skill folder path) */
   localPath: string;
+  /** How the skill folder is present in the scanned directory. */
+  installMode?: SkillInstallMode;
+  /** Resolved source directory when localPath is a symlink. */
+  symlinkTargetPath?: string;
+  /** True when the symlink target points into PromptHub-managed skill storage. */
+  isPromptHubManagedLink?: boolean;
   platforms: string[];
   safetyReport?: SkillSafetyReport;
   /**
@@ -385,4 +426,22 @@ export interface ScannedSkill {
    * of such duplicates, so the UI should warn the user.
    */
   nameConflict?: boolean;
+}
+
+export interface AgentScannedSkill extends ScannedSkill {
+  /** How the skill folder is present in the agent/platform skills directory. */
+  installMode: SkillInstallMode;
+  /** True when this skill is built into the owning agent platform itself. */
+  isPlatformBuiltin?: boolean;
+  /**
+   * Absolute path to the concrete platform skill folder that should be removed
+   * when uninstalling this agent-local skill.
+   */
+  platformSkillPath: string;
+}
+
+export interface SkillPlatformScanResult {
+  platform: SkillPlatform;
+  skillsDir: string;
+  scannedSkills: AgentScannedSkill[];
 }

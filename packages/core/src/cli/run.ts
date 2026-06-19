@@ -10,17 +10,22 @@ import {
   PromptDB,
   SkillDB,
 } from "../database";
-import {
-  configureRuntimePaths,
-  resetRuntimePaths,
-} from "../runtime-paths";
+import { configureRuntimePaths, resetRuntimePaths } from "../runtime-paths";
 import { rewriteRuleWithAi } from "../rules-rewrite";
 import { coreRulesWorkspaceService } from "../rules-workspace";
+import { coreCliSkillService, type CliSkillService } from "./skill-cli-service";
+import { handleAIConfigCommand } from "./ai-config-command";
 import {
-  coreCliSkillService,
-  type CliSkillService,
-} from "./skill-cli-service";
+  CoreMcpError,
+  CoreMcpLibraryService,
+  getMcpTargetPresets,
+} from "../mcp-library";
 import type { SkillPlatform } from "@prompthub/shared/constants/platforms";
+import {
+  MCP_TARGET_KINDS,
+  type McpApplyTarget,
+  type McpTargetKind,
+} from "@prompthub/shared/types/mcp";
 import type {
   CreateFolderDTO,
   Folder,
@@ -43,7 +48,7 @@ import type {
 import { isRuleFileId } from "@prompthub/shared/types";
 
 type CliWriter = (message: string) => void;
-type OutputFormat = "json" | "table";
+export type OutputFormat = "json" | "table";
 
 const EXIT_CODES = {
   OK: 0,
@@ -54,7 +59,7 @@ const EXIT_CODES = {
   INTERNAL: 10,
 } as const;
 
-const CLI_VERSION = "0.5.7-beta.2";
+const CLI_VERSION = "0.5.8-beta.3";
 
 type ExitCode = (typeof EXIT_CODES)[keyof typeof EXIT_CODES];
 
@@ -184,6 +189,8 @@ const ROOT_HELP = [
   "  rules     管理 rules",
   "  workspace 管理工作区导入导出",
   "  skill     管理 skills",
+  "  mcp       管理 MCP servers",
+  "  ai        管理 AI providers、models 和模型路由",
   "",
   "全局参数:",
   "  --data-dir <dir>        指定 PromptHub userData 目录",
@@ -199,11 +206,14 @@ const ROOT_HELP = [
   "  prompthub rules list",
   "  prompthub skill install ~/.claude/skills/my-skill",
   "  prompthub skill delete my-skill --purge-managed-repo",
+  "  prompthub ai provider-add --provider openai --api-key $OPENAI_API_KEY --api-url https://api.openai.com/v1",
   "",
   "更多帮助:",
   "  prompthub prompt --help",
   "  prompthub rules --help",
   "  prompthub skill --help",
+  "  prompthub mcp --help",
+  "  prompthub ai --help",
 ].join("\n");
 
 const PROMPT_HELP = [
@@ -259,7 +269,7 @@ const PROMPT_HELP = [
   "  prompthub prompt get 2b8d...",
   "  prompthub prompt duplicate 2b8d...",
   "  prompthub prompt versions 2b8d...",
-  "  prompthub prompt create-version 2b8d... --note \"Before refactor\"",
+  '  prompthub prompt create-version 2b8d... --note "Before refactor"',
   "  prompthub prompt delete-version 2b8d... 91f1...",
   "  prompthub prompt diff 2b8d... --from 1 --to 3",
   "  prompthub prompt rollback 2b8d... --version 3",
@@ -328,6 +338,31 @@ const SKILL_HELP = [
   "  prompthub skill delete writer --purge-managed-repo",
   "  prompthub skill remove writer --keep-platform-installs",
   "  prompthub --output table skill scan ~/.claude/skills",
+].join("\n");
+
+const MCP_HELP = [
+  "MCP 命令",
+  "",
+  "用法:",
+  "  prompthub mcp list",
+  "  prompthub mcp get <id|name>",
+  "  prompthub mcp market",
+  "  prompthub mcp sources",
+  "  prompthub mcp install <template-id>",
+  "  prompthub mcp import <file>",
+  "  prompthub mcp check [id|name]",
+  "  prompthub mcp env-import <id|name> --file <.env> [--keys A,B]",
+  "  prompthub mcp enable <id|name>",
+  "  prompthub mcp disable <id|name>",
+  "  prompthub mcp export --target <target> [--servers a,b]",
+  "  prompthub mcp apply --preset <preset-id> [--servers a,b] [--force]",
+  "  prompthub mcp apply --target <target> --path <file> [--servers a,b] [--force]",
+  "  prompthub mcp remove --preset <preset-id> --servers a,b",
+  "",
+  "说明:",
+  "  MCP CLI 读写与桌面端相同的 PromptHub MCP library。",
+  "  env-import 只导入当前 MCP 需要的 key，或 --keys 明确指定的 key。",
+  "  apply 默认拒绝覆盖目标配置中的外部同名 MCP；确认覆盖时使用 --force。",
 ].join("\n");
 
 const FOLDER_HELP = [
@@ -522,6 +557,16 @@ function emitError(context: CliContext, error: CliError): void {
   );
 }
 
+function mapCoreMcpError(error: CoreMcpError): CliError {
+  const exitCode =
+    error.code === "TARGET_CONFLICT"
+      ? EXIT_CODES.CONFLICT
+      : error.code === "NOT_FOUND"
+        ? EXIT_CODES.NOT_FOUND
+        : EXIT_CODES.USAGE;
+  return new CliError(error.code, error.message, exitCode);
+}
+
 function takeOption(args: string[], name: string): string | undefined {
   const index = args.indexOf(name);
   if (index === -1) {
@@ -571,7 +616,11 @@ function requirePositional(
   return value;
 }
 
-function requireRuleFileId(args: string[], index: number, label: string): RuleFileId {
+function requireRuleFileId(
+  args: string[],
+  index: number,
+  label: string,
+): RuleFileId {
   const value = requirePositional(args, index, label);
   if (!isRuleFileId(value)) {
     throw new CliError(
@@ -595,10 +644,7 @@ function parseCsv(value?: string): string[] | undefined {
   return items.length > 0 ? items : undefined;
 }
 
-function parseRepeatedOption(
-  args: string[],
-  name: string,
-): string[] {
+function parseRepeatedOption(args: string[], name: string): string[] {
   const values: string[] = [];
   while (true) {
     const value = takeOption(args, name);
@@ -764,12 +810,9 @@ function readRequiredTextFile(filePath: string): string {
   try {
     return fs.readFileSync(path.resolve(filePath), "utf8");
   } catch (error) {
-    throw new CliError(
-      "IO_ERROR",
-      `读取文件失败: ${filePath}`,
-      EXIT_CODES.IO,
-      { cause: error instanceof Error ? error.message : String(error) },
-    );
+    throw new CliError("IO_ERROR", `读取文件失败: ${filePath}`, EXIT_CODES.IO, {
+      cause: error instanceof Error ? error.message : String(error),
+    });
   }
 }
 
@@ -779,12 +822,9 @@ function writeRequiredTextFile(filePath: string, content: string): void {
     fs.mkdirSync(path.dirname(resolved), { recursive: true });
     fs.writeFileSync(resolved, content, "utf8");
   } catch (error) {
-    throw new CliError(
-      "IO_ERROR",
-      `写入文件失败: ${filePath}`,
-      EXIT_CODES.IO,
-      { cause: error instanceof Error ? error.message : String(error) },
-    );
+    throw new CliError("IO_ERROR", `写入文件失败: ${filePath}`, EXIT_CODES.IO, {
+      cause: error instanceof Error ? error.message : String(error),
+    });
   }
 }
 
@@ -864,10 +904,7 @@ function parseRulesBundle(text: string): CliRulesBundle {
   return record as unknown as CliRulesBundle;
 }
 
-function parseVariableType(
-  value: unknown,
-  label: string,
-): Variable["type"] {
+function parseVariableType(value: unknown, label: string): Variable["type"] {
   if (
     value === "text" ||
     value === "textarea" ||
@@ -942,7 +979,10 @@ function parseVariablesOption(args: string[]): Variable[] | undefined {
     }
 
     const record = item as Record<string, unknown>;
-    const name = parseOptionalStringValue(record.name, `variables[${index}].name`);
+    const name = parseOptionalStringValue(
+      record.name,
+      `variables[${index}].name`,
+    );
     if (!name?.trim()) {
       throw new CliError(
         "USAGE_ERROR",
@@ -961,7 +1001,10 @@ function parseVariablesOption(args: string[]): Variable[] | undefined {
     return {
       name,
       type: parseVariableType(record.type, `variables[${index}]`),
-      label: parseOptionalStringValue(record.label, `variables[${index}].label`),
+      label: parseOptionalStringValue(
+        record.label,
+        `variables[${index}].label`,
+      ),
       defaultValue: parseOptionalStringValue(
         record.defaultValue,
         `variables[${index}].defaultValue`,
@@ -1350,7 +1393,11 @@ function resolveRuleRewriteArgs(
   fileName: string,
   platformName: string,
 ): RuleRewriteRequest {
-  const instruction = readTextOption(args, "--instruction", "--instruction-file");
+  const instruction = readTextOption(
+    args,
+    "--instruction",
+    "--instruction-file",
+  );
   const apiKey = takeOption(args, "--api-key");
   const apiUrl = takeOption(args, "--api-url");
   const model = takeOption(args, "--model");
@@ -1528,9 +1575,10 @@ function diffPromptVersions(
   return { from, to, fields };
 }
 
-function resolvePromptVersionDiffArgs(
-  args: string[],
-): { from: number; to: number } {
+function resolvePromptVersionDiffArgs(args: string[]): {
+  from: number;
+  to: number;
+} {
   const from = parsePositiveNumberOption(takeOption(args, "--from"), "--from");
   const to = parsePositiveNumberOption(takeOption(args, "--to"), "--to");
   ensureNoUnknownOptions(args);
@@ -1567,7 +1615,10 @@ function duplicatePrompt(promptDb: PromptDB, id: string): Prompt {
   });
 }
 
-function renderPromptCopy(prompt: Prompt, variables: Record<string, string>): string {
+function renderPromptCopy(
+  prompt: Prompt,
+  variables: Record<string, string>,
+): string {
   let content = prompt.userPrompt;
   for (const [key, value] of Object.entries(variables)) {
     content = content.replace(new RegExp(`\\{\\{${key}\\}\\}`, "g"), value);
@@ -1629,6 +1680,107 @@ function skillPlatformRows(
     name: platform.name,
     installed: detectedSet.has(platform.id),
   }));
+}
+
+function mcpServerTableRows(
+  servers: ReturnType<CoreMcpLibraryService["read"]>["servers"],
+): Array<Record<string, unknown>> {
+  return servers.map((server) => ({
+    id: server.id,
+    name: server.name,
+    displayName: server.displayName,
+    transport: server.transport,
+    command: server.command ?? server.url ?? "",
+    enabled: server.enabled,
+    source: server.source.type,
+  }));
+}
+
+function mcpTemplateTableRows(
+  templates: ReturnType<CoreMcpLibraryService["getMarketTemplates"]>,
+): Array<Record<string, unknown>> {
+  return templates.map((template) => ({
+    id: template.id,
+    name: template.name,
+    runtime: template.runtime ?? template.command ?? template.transport,
+    package: template.packageName ?? "",
+    source: template.source?.label ?? "",
+  }));
+}
+
+function parseMcpTargetKind(value: string | undefined): McpTargetKind {
+  if (!value || !(MCP_TARGET_KINDS as readonly string[]).includes(value)) {
+    throw new CliError(
+      "USAGE_ERROR",
+      `--target 必须是: ${MCP_TARGET_KINDS.join("|")}`,
+      EXIT_CODES.USAGE,
+    );
+  }
+  return value as McpTargetKind;
+}
+
+function resolveMcpServerIds(
+  service: CoreMcpLibraryService,
+  identifiers?: string[],
+): string[] {
+  const servers = service.read().servers;
+  if (!identifiers?.length) {
+    return servers
+      .filter((server) => server.enabled)
+      .map((server) => server.id);
+  }
+
+  return identifiers.map((identifier) => {
+    const server = servers.find(
+      (item) => item.id === identifier || item.name === identifier,
+    );
+    if (!server) {
+      throw new CliError(
+        "NOT_FOUND",
+        `MCP 服务不存在: ${identifier}`,
+        EXIT_CODES.NOT_FOUND,
+      );
+    }
+    return server.id;
+  });
+}
+
+function resolveMcpApplyTarget(
+  args: string[],
+): Omit<McpApplyTarget, "serverIds"> {
+  const presetId = takeOption(args, "--preset");
+  const targetOption = takeOption(args, "--target");
+  const customPath = takeOption(args, "--path");
+
+  if (presetId) {
+    const preset = getMcpTargetPresets().find((item) => item.id === presetId);
+    if (!preset) {
+      throw new CliError(
+        "NOT_FOUND",
+        `MCP 目标平台不存在: ${presetId}`,
+        EXIT_CODES.NOT_FOUND,
+      );
+    }
+    return {
+      target: preset.target,
+      scope: preset.scope,
+      path: preset.path,
+    };
+  }
+
+  const target = parseMcpTargetKind(targetOption);
+  if (!customPath?.trim()) {
+    throw new CliError(
+      "USAGE_ERROR",
+      "mcp apply/remove 需要 --preset 或 --target + --path",
+      EXIT_CODES.USAGE,
+    );
+  }
+  return {
+    target,
+    scope: "custom",
+    path: path.resolve(customPath),
+  };
 }
 
 async function handlePromptCommand(
@@ -1957,7 +2109,10 @@ async function handleFolderCommand(
   }
 
   if (action === "create") {
-    emitSuccess(context, folderDb.create(resolveFolderCreateArgs(args.slice(1))));
+    emitSuccess(
+      context,
+      folderDb.create(resolveFolderCreateArgs(args.slice(1))),
+    );
     return;
   }
 
@@ -2110,7 +2265,10 @@ async function handleRulesCommand(
   if (action === "read") {
     const ruleId = requireRuleFileId(args, 1, "rule id");
     ensureNoUnknownOptions(args.slice(2));
-    emitSuccess(context, await coreRulesWorkspaceService.readRuleContent(ruleId));
+    emitSuccess(
+      context,
+      await coreRulesWorkspaceService.readRuleContent(ruleId),
+    );
     return;
   }
 
@@ -2152,7 +2310,10 @@ async function handleRulesCommand(
         EXIT_CODES.NOT_FOUND,
       );
     }
-    emitSuccess(context, await coreRulesWorkspaceService.saveRuleContent(ruleId, version.content));
+    emitSuccess(
+      context,
+      await coreRulesWorkspaceService.saveRuleContent(ruleId, version.content),
+    );
     return;
   }
 
@@ -2170,7 +2331,10 @@ async function handleRulesCommand(
       );
     }
 
-    emitSuccess(context, await coreRulesWorkspaceService.saveRuleContent(ruleId, content));
+    emitSuccess(
+      context,
+      await coreRulesWorkspaceService.saveRuleContent(ruleId, content),
+    );
     return;
   }
 
@@ -2229,7 +2393,10 @@ async function handleRulesCommand(
     const ruleId = requireRuleFileId(args, 1, "rule id");
     const versionId = requirePositional(args, 2, "version id");
     ensureNoUnknownOptions(args.slice(3));
-    const versions = await coreRulesWorkspaceService.deleteRuleVersion(ruleId, versionId);
+    const versions = await coreRulesWorkspaceService.deleteRuleVersion(
+      ruleId,
+      versionId,
+    );
     emitSuccess(context, versions, ruleVersionTableRows(versions));
     return;
   }
@@ -2351,7 +2518,11 @@ async function handleSkillCommand(
       );
     }
     const { skill } = resolveSkillIdentifier(skillDb, identifier);
-    const updated = await context.skills.rollbackVersion(skillDb, skill.id, version);
+    const updated = await context.skills.rollbackVersion(
+      skillDb,
+      skill.id,
+      version,
+    );
     if (!updated) {
       throw new CliError(
         "NOT_FOUND",
@@ -2368,7 +2539,11 @@ async function handleSkillCommand(
     const versionId = requirePositional(args, 2, "version id");
     ensureNoUnknownOptions(args.slice(3));
     const { skill } = resolveSkillIdentifier(skillDb, identifier);
-    const deleted = await context.skills.deleteVersion(skillDb, skill.id, versionId);
+    const deleted = await context.skills.deleteVersion(
+      skillDb,
+      skill.id,
+      versionId,
+    );
     if (!deleted) {
       throw new CliError(
         "NOT_FOUND",
@@ -2421,7 +2596,10 @@ async function handleSkillCommand(
     const identifier = requirePositional(args, 1, "skill id 或 name");
     ensureNoUnknownOptions(args.slice(2));
     const { skill } = resolveSkillIdentifier(skillDb, identifier);
-    emitSuccess(context, await context.skills.getSkillMdInstallStatus(skill.name));
+    emitSuccess(
+      context,
+      await context.skills.getSkillMdInstallStatus(skill.name),
+    );
     return;
   }
 
@@ -2498,7 +2676,11 @@ async function handleSkillCommand(
     const { skill } = resolveSkillIdentifier(skillDb, identifier);
     emitSuccess(
       context,
-      await context.skills.readLocalFile(skillDb, skill.id, relativePath.trim()),
+      await context.skills.readLocalFile(
+        skillDb,
+        skill.id,
+        relativePath.trim(),
+      ),
     );
     return;
   }
@@ -2517,8 +2699,17 @@ async function handleSkillCommand(
       );
     }
     const { skill } = resolveSkillIdentifier(skillDb, identifier);
-    await context.skills.writeLocalFile(skillDb, skill.id, relativePath.trim(), content);
-    emitSuccess(context, { written: true, skillId: skill.id, path: relativePath.trim() });
+    await context.skills.writeLocalFile(
+      skillDb,
+      skill.id,
+      relativePath.trim(),
+      content,
+    );
+    emitSuccess(context, {
+      written: true,
+      skillId: skill.id,
+      path: relativePath.trim(),
+    });
     return;
   }
 
@@ -2535,8 +2726,16 @@ async function handleSkillCommand(
       );
     }
     const { skill } = resolveSkillIdentifier(skillDb, identifier);
-    await context.skills.deleteLocalFile(skillDb, skill.id, relativePath.trim());
-    emitSuccess(context, { deleted: true, skillId: skill.id, path: relativePath.trim() });
+    await context.skills.deleteLocalFile(
+      skillDb,
+      skill.id,
+      relativePath.trim(),
+    );
+    emitSuccess(context, {
+      deleted: true,
+      skillId: skill.id,
+      path: relativePath.trim(),
+    });
     return;
   }
 
@@ -2554,7 +2753,11 @@ async function handleSkillCommand(
     }
     const { skill } = resolveSkillIdentifier(skillDb, identifier);
     await context.skills.createLocalDir(skillDb, skill.id, relativePath.trim());
-    emitSuccess(context, { created: true, skillId: skill.id, path: relativePath.trim() });
+    emitSuccess(context, {
+      created: true,
+      skillId: skill.id,
+      path: relativePath.trim(),
+    });
     return;
   }
 
@@ -2572,7 +2775,12 @@ async function handleSkillCommand(
       );
     }
     const { skill } = resolveSkillIdentifier(skillDb, identifier);
-    await context.skills.renameLocalPath(skillDb, skill.id, oldPath.trim(), newPath.trim());
+    await context.skills.renameLocalPath(
+      skillDb,
+      skill.id,
+      oldPath.trim(),
+      newPath.trim(),
+    );
     emitSuccess(context, {
       renamed: true,
       skillId: skill.id,
@@ -2612,14 +2820,19 @@ async function handleSkillCommand(
   }
 
   if (action === "scan") {
-    const scanned = await context.skills.scanLocalPreview(args.slice(1), skillDb);
+    const scanned = await context.skills.scanLocalPreview(
+      args.slice(1),
+      skillDb,
+    );
     emitSuccess(
       context,
       scanned,
       scanned.map((skill) => ({
         name: skill.name,
         safety: skill.safetyReport?.level ?? "unknown",
-        findings: skill.safetyReport?.findings.length ?? 0,
+        findings: Array.isArray(skill.safetyReport?.findings)
+          ? skill.safetyReport.findings.length
+          : 0,
         author: skill.author,
         version: skill.version,
         platforms: skill.platforms,
@@ -2632,6 +2845,184 @@ async function handleSkillCommand(
   throw new CliError(
     "USAGE_ERROR",
     `不支持的 skill 子命令: ${action}`,
+    EXIT_CODES.USAGE,
+  );
+}
+
+async function handleMcpCommand(
+  args: string[],
+  context: CliContext,
+): Promise<void> {
+  if (args.length === 0 || takeFlag(args, "--help") || takeFlag(args, "-h")) {
+    context.io.stdout(MCP_HELP);
+    return;
+  }
+
+  const service = new CoreMcpLibraryService();
+  const action = requirePositional(args, 0, "mcp 子命令");
+
+  if (action === "list") {
+    ensureNoUnknownOptions(args.slice(1));
+    const library = service.read();
+    emitSuccess(context, library.servers, mcpServerTableRows(library.servers));
+    return;
+  }
+
+  if (action === "get") {
+    const identifier = requirePositional(args, 1, "mcp id 或 name");
+    ensureNoUnknownOptions(args.slice(2));
+    const server = service
+      .read()
+      .servers.find(
+        (item) => item.id === identifier || item.name === identifier,
+      );
+    if (!server) {
+      throw new CliError(
+        "NOT_FOUND",
+        `MCP 服务不存在: ${identifier}`,
+        EXIT_CODES.NOT_FOUND,
+      );
+    }
+    emitSuccess(context, server);
+    return;
+  }
+
+  if (action === "market") {
+    ensureNoUnknownOptions(args.slice(1));
+    const templates = service.getMarketTemplates();
+    emitSuccess(context, templates, mcpTemplateTableRows(templates));
+    return;
+  }
+
+  if (action === "sources") {
+    ensureNoUnknownOptions(args.slice(1));
+    const sources = service.getMarketSources();
+    emitSuccess(
+      context,
+      sources,
+      sources.map((source) => ({
+        id: source.id,
+        label: source.label,
+        trustLevel: source.trustLevel,
+        url: source.url,
+      })),
+    );
+    return;
+  }
+
+  if (action === "install") {
+    const templateId = requirePositional(args, 1, "template id");
+    ensureNoUnknownOptions(args.slice(2));
+    emitSuccess(context, service.installTemplate(templateId));
+    return;
+  }
+
+  if (action === "enable" || action === "disable") {
+    const identifier = requirePositional(args, 1, "mcp id 或 name");
+    ensureNoUnknownOptions(args.slice(2));
+    emitSuccess(
+      context,
+      service.setServerEnabled(identifier, action === "enable"),
+    );
+    return;
+  }
+
+  if (action === "import") {
+    const filePath = requirePositional(args, 1, "mcp config file");
+    ensureNoUnknownOptions(args.slice(2));
+    emitSuccess(context, service.importFromFile(path.resolve(filePath)));
+    return;
+  }
+
+  if (action === "export") {
+    const exportArgs = args.slice(1);
+    const target = parseMcpTargetKind(takeOption(exportArgs, "--target"));
+    const serverIds = resolveMcpServerIds(
+      service,
+      parseCsv(takeOption(exportArgs, "--servers")),
+    );
+    ensureNoUnknownOptions(exportArgs);
+    context.io.stdout(service.preview(target, serverIds));
+    return;
+  }
+
+  if (action === "apply" || action === "remove") {
+    const targetArgs = args.slice(1);
+    const serverIdentifiers = parseCsv(takeOption(targetArgs, "--servers"));
+    const force = action === "apply" ? takeFlag(targetArgs, "--force") : false;
+    if (action === "remove" && !serverIdentifiers?.length) {
+      throw new CliError(
+        "USAGE_ERROR",
+        "mcp remove 需要 --servers 明确指定要移除的服务",
+        EXIT_CODES.USAGE,
+      );
+    }
+    const serverIds = resolveMcpServerIds(service, serverIdentifiers);
+    const target = resolveMcpApplyTarget(targetArgs);
+    ensureNoUnknownOptions(targetArgs);
+    if (serverIds.length === 0) {
+      throw new CliError(
+        "USAGE_ERROR",
+        "没有可处理的 MCP 服务；请启用服务或用 --servers 指定",
+        EXIT_CODES.USAGE,
+      );
+    }
+    emitSuccess(
+      context,
+      action === "apply"
+        ? service.apply({ ...target, serverIds, force })
+        : service.removeFromTarget({ ...target, serverIds }),
+    );
+    return;
+  }
+
+  if (action === "check") {
+    const identifier = args[1];
+    ensureNoUnknownOptions(args.slice(identifier ? 2 : 1));
+    const result = identifier
+      ? service.checkServer(identifier)
+      : service.checkAllServers();
+    emitSuccess(
+      context,
+      result,
+      Array.isArray(result)
+        ? result.map((item) => ({
+            server: item.serverName,
+            status: item.status,
+            issues: item.issues.length,
+          }))
+        : undefined,
+    );
+    return;
+  }
+
+  if (action === "env-import") {
+    const identifier = requirePositional(args, 1, "mcp id 或 name");
+    const importArgs = args.slice(2);
+    const filePath = takeOption(importArgs, "--file");
+    const selectedKeys = parseCsv(takeOption(importArgs, "--keys"));
+    ensureNoUnknownOptions(importArgs);
+    if (!filePath?.trim()) {
+      throw new CliError(
+        "USAGE_ERROR",
+        "mcp env-import 需要 --file",
+        EXIT_CODES.USAGE,
+      );
+    }
+    emitSuccess(
+      context,
+      service.importEnvForServer(
+        identifier,
+        path.resolve(filePath),
+        selectedKeys,
+      ),
+    );
+    return;
+  }
+
+  throw new CliError(
+    "USAGE_ERROR",
+    `不支持的 mcp 子命令: ${action}`,
     EXIT_CODES.USAGE,
   );
 }
@@ -2725,6 +3116,13 @@ export async function runCli(
       await handleSkillCommand(commandArgs, context, databaseHooks);
       return EXIT_CODES.OK;
     }
+    if (resource === "mcp") {
+      await handleMcpCommand(commandArgs, context);
+      return EXIT_CODES.OK;
+    }
+    if (resource === "ai") {
+      return await handleAIConfigCommand(commandArgs, io, configured.output);
+    }
 
     throw new CliError(
       "USAGE_ERROR",
@@ -2735,11 +3133,13 @@ export async function runCli(
     const cliError =
       error instanceof CliError
         ? error
-        : new CliError(
-            "INTERNAL_ERROR",
-            error instanceof Error ? error.message : String(error),
-            EXIT_CODES.INTERNAL,
-          );
+        : error instanceof CoreMcpError
+          ? mapCoreMcpError(error)
+          : new CliError(
+              "INTERNAL_ERROR",
+              error instanceof Error ? error.message : String(error),
+              EXIT_CODES.INTERNAL,
+            );
     emitError({ io, output: "json", skills: skillService }, cliError);
     return cliError.exitCode;
   } finally {

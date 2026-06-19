@@ -85,7 +85,7 @@ export function SkillPreviewPane({
     <div className="lg:col-span-2 flex h-full min-h-0 flex-col overflow-hidden space-y-6">
       <section className="shrink-0 space-y-4">
         <h3 className="text-xs font-bold text-muted-foreground uppercase tracking-[0.2em] flex items-center gap-2">
-          {t("skill.skillDescription", "技能描述")}
+          {t("skill.skillDescription", "Skill 描述")}
         </h3>
         <div className="app-wallpaper-panel rounded-2xl border border-border p-5 space-y-4">
           <p className="text-sm text-foreground/90 leading-relaxed">
@@ -96,7 +96,7 @@ export function SkillPreviewPane({
             <SkillVariantBadgeList badges={sourceBadges} className="contents" />
             {safeAuthorLabel && (
               <span className="text-xs bg-accent px-2 py-1 rounded-full font-medium text-foreground/80 flex items-center gap-1">
-                <GlobeIcon className="w-3 h-3 text-muted-foreground" />
+                <GlobeIcon aria-hidden="true" className="w-3 h-3 text-muted-foreground" />
                 {safeAuthorLabel}
               </span>
             )}
@@ -121,6 +121,7 @@ export function SkillPreviewPane({
             {skillContent.trim() && (
               <div className="flex gap-2">
                 <button
+                  type="button"
                   onClick={() => handleTranslateSkill(false)}
                   disabled={isTranslating}
                   className={`p-1 px-3 rounded-lg text-xs flex items-center gap-1.5 transition-colors ${
@@ -130,9 +131,9 @@ export function SkillPreviewPane({
                   } disabled:opacity-50`}
                 >
                   {isTranslating ? (
-                    <Loader2Icon className="w-3.5 h-3.5 animate-spin" />
+                    <Loader2Icon aria-hidden="true" className="w-3.5 h-3.5 animate-spin" />
                   ) : (
-                    <LanguagesIcon className="w-3.5 h-3.5" />
+                    <LanguagesIcon aria-hidden="true" className="w-3.5 h-3.5" />
                   )}
                   {isTranslating
                     ? t("skill.translating", "Translating...")
@@ -144,12 +145,14 @@ export function SkillPreviewPane({
                 </button>
                 {cachedInstructionsTranslation && (
                   <button
+                    type="button"
                     onClick={() => handleTranslateSkill(true)}
                     disabled={isTranslating}
                     className="p-1 px-3 rounded-lg text-xs flex items-center gap-1.5 bg-accent/50 hover:bg-accent transition-colors disabled:opacity-50"
                     title={t("skill.refreshTranslation", "Refresh Translation")}
                   >
                     <RefreshCwIcon
+                      aria-hidden="true"
                       className={`w-3.5 h-3.5 ${isTranslating ? "animate-spin" : ""}`}
                     />
                     {t("skill.refreshTranslation", "Refresh Translation")}
@@ -166,13 +169,14 @@ export function SkillPreviewPane({
               </div>
             )}
             <button
+              type="button"
               onClick={() => handleCopy(skillContent, "instr")}
               className="p-1 px-3 bg-accent/50 hover:bg-accent rounded-lg text-xs flex items-center gap-1.5 transition-colors"
             >
               {copyStatus.instr ? (
-                <CheckIcon className="w-3.5 h-3.5 text-green-500" />
+                <CheckIcon aria-hidden="true" className="w-3.5 h-3.5 text-green-500" />
               ) : (
-                <CopyIcon className="w-3.5 h-3.5" />
+                <CopyIcon aria-hidden="true" className="w-3.5 h-3.5" />
               )}
               {copyStatus.instr ? t("skill.copied") : t("skill.copyMd")}
             </button>
@@ -238,7 +242,7 @@ export function SkillPreviewPane({
                 )
               ) : (
                 <div className="flex flex-col items-center justify-center py-16 opacity-30">
-                  <BookOpenIcon className="w-12 h-12 mb-2" />
+                  <BookOpenIcon aria-hidden="true" className="w-12 h-12 mb-2" />
                   <p>{t("skill.noInstructions")}</p>
                 </div>
               )}

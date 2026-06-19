@@ -2,8 +2,9 @@ import type { LucideIcon } from "lucide-react";
 import type { AIProtocol } from "@prompthub/shared/types";
 
 import type {
+  AIModelCapabilities,
   AIModelConfig,
-  AIUsageScenario,
+  AIModelRoute,
 } from "../../../stores/settings.store";
 
 export type ProviderOption = {
@@ -12,7 +13,7 @@ export type ProviderOption = {
   defaultUrl: string;
   recommendedProtocol: AIProtocol;
   allowsCustomProtocol: boolean;
-  group: "overseas" | "domestic" | "other";
+  iconCategory: string;
 };
 
 export type ModelType = "chat" | "image";
@@ -20,11 +21,13 @@ export type ModelType = "chat" | "image";
 export type ModelFormState = {
   type: ModelType;
   name: string;
+  providerId?: string;
   provider: string;
   apiProtocol: AIProtocol;
   apiKey: string;
   apiUrl: string;
   model: string;
+  capabilities: Required<AIModelCapabilities>;
   chatParams: {
     temperature: number;
     maxTokens: number;
@@ -52,14 +55,19 @@ export type EndpointStatus = {
 
 export type EndpointGroup = {
   key: string;
+  providerConfigId?: string;
+  name?: string;
   provider: string;
   apiProtocol: AIProtocol;
+  apiKey: string;
   apiUrl: string;
   models: AIModelConfig[];
 };
 
 export type EndpointDraft = {
   key: string;
+  providerConfigId?: string;
+  name: string;
   provider: string;
   apiProtocol: AIProtocol;
   apiKey: string;
@@ -67,11 +75,12 @@ export type EndpointDraft = {
 };
 
 export type ScenarioDefinition = {
-  key: AIUsageScenario;
+  key: AIModelRoute;
   labelKey: string;
   descKey: string;
   type: ModelType;
   badgeKey: string;
+  requiredCapability?: keyof AIModelCapabilities;
 };
 
 export type ModelOption = {

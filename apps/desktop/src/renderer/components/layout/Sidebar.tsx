@@ -4,6 +4,8 @@ import {
   useRef,
   useCallback,
   useMemo,
+  lazy,
+  Suspense,
   memo,
   type CSSProperties,
 } from "react";
@@ -22,15 +24,15 @@ import {
   MessageSquareTextIcon,
   CommandIcon,
   CuboidIcon,
+  BotIcon,
   StoreIcon,
-  GlobeIcon,
-  Clock3Icon,
   FolderPlusIcon,
   BookOpenIcon,
   LinkIcon,
   FolderOpenIcon,
-  Trash2Icon,
-  RefreshCwIcon,
+  ServerIcon,
+  GitBranchIcon,
+  PackageIcon,
 } from "lucide-react";
 import { useFolderStore } from "../../stores/folder.store";
 import { usePromptStore } from "../../stores/prompt.store";
@@ -42,26 +44,32 @@ import {
   SIDEBAR_PANEL_WIDTH_MIN,
 } from "../../stores/ui.store";
 import { ColumnResizer } from "../ui/ColumnResizer";
+import { Spinner } from "../ui/Spinner";
 import { useSkillStore } from "../../stores/skill.store";
+import { useMcpStore } from "../../stores/mcp.store";
+import { usePluginStore } from "../../stores/plugin.store";
 import { FolderModal, PrivateFolderUnlockModal } from "../folder";
 import { useTranslation } from "react-i18next";
 import type { Folder } from "@prompthub/shared/types";
-import { BUILTIN_SKILL_REGISTRY } from "@prompthub/shared/constants/skill-registry";
 import { SortableTree } from "./tree/SortableTree";
 import type { FlattenedItem } from "./tree/utilities";
 import { buildPromptStats } from "../../services/prompt-filter";
 import { buildSkillStats } from "../../services/skill-stats";
+import { getRemoteStoreSkillCount } from "../../services/remote-store-entry";
 import { getRuntimeCapabilities, isWebRuntime } from "../../runtime";
-import { useRulesStore } from "../../stores/rules.store";
-import { PlatformIcon } from "../ui/PlatformIcon";
-import { useToast } from "../ui/Toast";
 import { TagManagerModal } from "../prompt/TagManagerModal";
 import { mergePromptTagCatalog } from "../prompt/prompt-modal-utils";
-import { getOrderedGlobalRuleFiles } from "../../services/rule-platform-order";
+import { filterDetectedPlatforms } from "../../services/platform-visibility";
 import {
   DESKTOP_HOME_MODULES,
   type DesktopHomeModule,
 } from "../../stores/settings.store";
+
+const RulesSidebarPanel = lazy(() =>
+  import("./RulesSidebarPanel").then((module) => ({
+    default: module.RulesSidebarPanel,
+  })),
+);
 
 type PageType = "home" | "settings";
 type SidebarLayout = "combined" | "rail" | "panel";
@@ -75,7 +83,7 @@ interface SidebarProps {
 interface NavItemProps {
   icon: React.ReactNode;
   label: string;
-  count?: number;
+  count?: number | string;
   active?: boolean;
   onClick: () => void;
   collapsed?: boolean;
@@ -94,7 +102,9 @@ const NavItem = memo(function NavItem({
   return (
     <div className="w-full py-0.5">
       <button
+        type="button"
         onClick={onClick}
+        aria-label={label}
         title={label}
         className={`
           flex items-center rounded-lg transition-all duration-smooth relative group
@@ -107,6 +117,7 @@ const NavItem = memo(function NavItem({
         `}
       >
         <span
+          aria-hidden="true"
           className={`flex shrink-0 items-center justify-center transition-transform duration-smooth ${collapsed ? "w-5 h-5 group-hover:scale-110" : "w-4 h-4"}`}
         >
           {icon}
@@ -144,6 +155,8 @@ export function Sidebar({
   const toggleExpand = useFolderStore((state) => state.toggleExpand);
   const updateFolder = useFolderStore((state) => state.updateFolder);
   const prompts = usePromptStore((state) => state.prompts);
+  const promptViewMode = usePromptStore((state) => state.viewMode);
+  const setPromptViewMode = usePromptStore((state) => state.setViewMode);
   const promptTypeFilter = usePromptStore((state) => state.promptTypeFilter);
   const setPromptTypeFilter = usePromptStore(
     (state) => state.setPromptTypeFilter,
@@ -158,12 +171,6 @@ export function Sidebar({
   const [isPasswordModalOpen, setIsPasswordModalOpen] = useState(false);
   const [passwordFolder, setPasswordFolder] = useState<Folder | null>(null);
   const [showAllTags, setShowAllTags] = useState(false);
-  const [collapsedRuleSections, setCollapsedRuleSections] = useState<
-    Record<"global" | "project", boolean>
-  >({
-    global: false,
-    project: false,
-  });
   const filterTags = usePromptStore((state) => state.filterTags);
   const toggleFilterTag = usePromptStore((state) => state.toggleFilterTag);
   const clearFilterTags = usePromptStore((state) => state.clearFilterTags);
@@ -202,30 +209,12 @@ export function Sidebar({
     (state) => state.setSidebarPanelWidth,
   );
   const skillProjects = useSettingsStore((state) => state.skillProjects);
+  const disabledPlatformIds = useSettingsStore(
+    (state) => state.disabledPlatformIds,
+  );
   const desktopHomeModules = useSettingsStore(
     (state) => state.desktopHomeModules,
   );
-  const addRuleProject = useRulesStore((state) => state.addProjectRule);
-  const removeRuleProject = useRulesStore((state) => state.removeProjectRule);
-  const ruleFiles = useRulesStore((state) => state.files);
-  const rulesSearchQuery = useRulesStore((state) => state.searchQuery);
-  const selectedRuleId = useRulesStore((state) => state.selectedRuleId);
-  const selectRule = useRulesStore((state) => state.selectRule);
-  const loadRuleFiles = useRulesStore((state) => state.loadFiles);
-  const isRulesLoading = useRulesStore((state) => state.isLoading);
-  const skillPlatformOrder = useSettingsStore(
-    (state) => state.skillPlatformOrder,
-  );
-  const { showToast } = useToast();
-
-  const handleRescanRules = useCallback(async () => {
-    try {
-      await loadRuleFiles({ force: true });
-      showToast(t("rules.rescanDone", "Rules rescanned"), "success");
-    } catch {
-      showToast(t("rules.rescanFailed", "Rescan failed"), "error");
-    }
-  }, [loadRuleFiles, showToast, t]);
 
   const handlePromptTagClick = useCallback(
     (tag: string) => {
@@ -236,9 +225,17 @@ export function Sidebar({
         toggleFilterTag(tag);
       }
 
+      setPromptViewMode("card");
       if (currentPage !== "home") onNavigate("home");
     },
-    [currentPage, filterTags, onNavigate, tagFilterMode, toggleFilterTag],
+    [
+      currentPage,
+      filterTags,
+      onNavigate,
+      setPromptViewMode,
+      tagFilterMode,
+      toggleFilterTag,
+    ],
   );
 
   const handlePromptTagDragStart = useCallback(
@@ -262,22 +259,104 @@ export function Sidebar({
   const selectedStoreSourceId = useSkillStore(
     (state) => state.selectedStoreSourceId,
   );
+  const [isSkillStoreGroupExpanded, setIsSkillStoreGroupExpanded] = useState(
+    () => storeView === "store",
+  );
   const selectStoreSource = useSkillStore((state) => state.selectStoreSource);
   const customStoreSources = useSkillStore((state) => state.customStoreSources);
   const remoteStoreEntries = useSkillStore((state) => state.remoteStoreEntries);
+  const agentScanState = useSkillStore((state) => state.agentScanState);
   const skillFilterTags = useSkillStore((state) => state.filterTags);
   const toggleSkillFilterTag = useSkillStore((state) => state.toggleFilterTag);
   const clearSkillFilterTags = useSkillStore((state) => state.clearFilterTags);
+  const mcpLibrary = useMcpStore((state) => state.library);
+  const mcpMarketTemplates = useMcpStore((state) => state.marketTemplates);
+  const mcpMarketSources = useMcpStore((state) => state.marketSources);
+  const mcpTargetPresets = useMcpStore((state) => state.targetPresets);
+  const mcpSelectedTab = useMcpStore((state) => state.selectedTab);
+  const mcpSelectedMarketSourceId = useMcpStore(
+    (state) => state.selectedMarketSourceId,
+  );
+  const setMcpSelectedTab = useMcpStore((state) => state.setSelectedTab);
+  const setMcpSelectedMarketSourceId = useMcpStore(
+    (state) => state.setSelectedMarketSourceId,
+  );
+  const [isMcpStoreGroupExpanded, setIsMcpStoreGroupExpanded] = useState(
+    () => mcpSelectedTab === "market",
+  );
+  const pluginLibrary = usePluginStore((state) => state.library);
+  const pluginMarketSources = usePluginStore((state) => state.marketSources);
+  const pluginTargetMatrix = usePluginStore((state) => state.targetMatrix);
+  const pluginSelectedTab = usePluginStore((state) => state.selectedTab);
+  const pluginSelectedMarketSourceId = usePluginStore(
+    (state) => state.selectedMarketSourceId,
+  );
+  const setPluginSelectedTab = usePluginStore((state) => state.setSelectedTab);
+  const setPluginSelectedMarketSourceId = usePluginStore(
+    (state) => state.setSelectedMarketSourceId,
+  );
+  const [isPluginStoreGroupExpanded, setIsPluginStoreGroupExpanded] = useState(
+    () => pluginSelectedTab === "market",
+  );
   const claudeCodeStoreCount = useMemo(
-    () => remoteStoreEntries["claude-code"]?.skills.length || 0,
+    () => getRemoteStoreSkillCount(remoteStoreEntries["claude-code"]),
     [remoteStoreEntries],
   );
   const openAiCodexStoreCount = useMemo(
-    () => remoteStoreEntries["openai-codex"]?.skills.length || 0,
+    () => getRemoteStoreSkillCount(remoteStoreEntries["openai-codex"]),
     [remoteStoreEntries],
   );
+  const communityStoreCount = useMemo(
+    () =>
+      remoteStoreEntries.community?.totalCount ??
+      getRemoteStoreSkillCount(remoteStoreEntries.community),
+    [remoteStoreEntries],
+  );
+  const clawHubStoreCount = useMemo(() => {
+    const entry = remoteStoreEntries.clawhub;
+    if (!entry) return 0;
+    if (typeof entry.totalCount === "number") return entry.totalCount;
+    const loadedCount = getRemoteStoreSkillCount(entry);
+    return entry.nextCursor ? `${loadedCount}+` : loadedCount;
+  }, [remoteStoreEntries]);
+  const mcpMarketSourceCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const template of mcpMarketTemplates) {
+      const sourceId = template.source?.id;
+      if (!sourceId) {
+        continue;
+      }
+      counts.set(sourceId, (counts.get(sourceId) ?? 0) + 1);
+    }
+    return counts;
+  }, [mcpMarketTemplates]);
   const [showAllSkillTags, setShowAllSkillTags] = useState(false);
+  const [detectedSkillAgentCount, setDetectedSkillAgentCount] = useState<
+    number | null
+  >(null);
+  const cachedSkillAgentCount = useMemo(
+    () =>
+      Object.entries(agentScanState).filter(
+        ([platformId, state]) =>
+          state?.result && !disabledPlatformIds.includes(platformId),
+      ).length,
+    [agentScanState, disabledPlatformIds],
+  );
+  const visibleSkillAgentCount =
+    detectedSkillAgentCount ?? cachedSkillAgentCount;
   const promptStats = useMemo(() => buildPromptStats(prompts), [prompts]);
+  const folderPromptCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+
+    for (const prompt of prompts) {
+      if (!prompt.folderId) {
+        continue;
+      }
+      counts.set(prompt.folderId, (counts.get(prompt.folderId) ?? 0) + 1);
+    }
+
+    return counts;
+  }, [prompts]);
   const skillStats = useMemo(
     () => buildSkillStats(skills, deployedSkillNames),
     [skills, deployedSkillNames],
@@ -288,125 +367,134 @@ export function Sidebar({
     [promptTagCatalog, prompts],
   );
   const uniqueSkillTags = skillStats.uniqueUserTags;
+  const shouldShowSkillTags =
+    storeView === "my-skills" && uniqueSkillTags.length > 0;
   const runtimeCapabilities = getRuntimeCapabilities();
   const webRuntime = isWebRuntime();
   const canAddRuleProject = !webRuntime;
-  const activeModule = appModule === "rules" ? "rules" : viewMode;
-  const visibleDesktopModules = useMemo(
-    () =>
-      desktopHomeModules.filter((moduleId) =>
-        DESKTOP_HOME_MODULES.includes(moduleId),
-      ),
-    [desktopHomeModules],
+  const activeModule = appModule;
+
+  const openPromptTypeFilter = useCallback(
+    (filter: "all" | "text" | "image") => {
+      setPromptViewMode("card");
+      setPromptTypeFilter(filter);
+      selectFolder(null);
+      if (currentPage !== "home") onNavigate("home");
+    },
+    [
+      currentPage,
+      onNavigate,
+      selectFolder,
+      setPromptTypeFilter,
+      setPromptViewMode,
+    ],
   );
-  const hasVisibleModule = visibleDesktopModules.length > 0;
-  const isPromptModuleVisible = visibleDesktopModules.includes("prompt");
-  const isSkillModuleVisible = visibleDesktopModules.includes("skill");
-  const isRulesModuleVisible = visibleDesktopModules.includes("rules");
-  const ruleSidebarSections = useMemo(() => {
-    const normalizedQuery = rulesSearchQuery.trim().toLowerCase();
-    const matchesRuleSearch = (file: (typeof ruleFiles)[number]) => {
-      if (!normalizedQuery) {
-        return true;
-      }
 
-      const haystack = [
-        file.platformName,
-        file.platformDescription,
-        file.name,
-        file.description,
-        file.path,
-        file.projectRootPath || "",
-      ]
-        .join(" ")
-        .toLowerCase();
+  const openPromptFolder = useCallback(
+    (folderId: string) => {
+      setPromptViewMode("card");
+      selectFolder(folderId);
+      if (currentPage !== "home") onNavigate("home");
+    },
+    [currentPage, onNavigate, selectFolder, setPromptViewMode],
+  );
 
-      return haystack.includes(normalizedQuery);
-    };
+  const openRelationshipGraph = useCallback(() => {
+    setPromptTypeFilter("all");
+    selectFolder(null);
+    setPromptViewMode("graph");
+    if (currentPage !== "home") onNavigate("home");
+  }, [
+    currentPage,
+    onNavigate,
+    selectFolder,
+    setPromptTypeFilter,
+    setPromptViewMode,
+  ]);
 
-    const globalItems = getOrderedGlobalRuleFiles(ruleFiles, skillPlatformOrder)
-      .filter((file) => matchesRuleSearch(file))
-      .map((file) => ({
-        id: file.id,
-        type: "global" as const,
-        platformId: file.platformId,
-        file,
-        path: file.path,
-        exists: file.exists,
-        active: selectedRuleId === file.id,
-        canRemove: false,
-        projectId: null,
-        description: file.description,
-        icon: file.platformIcon,
-        badge: null,
-        name: file.platformName,
-      }));
+  useEffect(() => {
+    if (storeView === "store") {
+      setIsSkillStoreGroupExpanded(true);
+    }
+  }, [storeView]);
 
-    const projectItems = ruleFiles
-      .filter(
-        (file) => file.id.startsWith("project:") && matchesRuleSearch(file),
-      )
-      .map((file) => ({
-        id: file.id,
-        type: "project" as const,
-        platformId: file.platformId,
-        file,
-        path: file.path,
-        exists: file.exists,
-        active: selectedRuleId === file.id,
-        canRemove: true,
-        projectId: file.id.slice("project:".length),
-        description: file.description,
-        icon: "FolderRoot",
-        badge: null,
-        name: file.platformName,
-      }));
+  useEffect(() => {
+    if (mcpSelectedTab === "market") {
+      setIsMcpStoreGroupExpanded(true);
+    }
+  }, [mcpSelectedTab]);
 
-    return [
-      {
-        id: "global" as const,
-        title: "Global Rules",
-        items: globalItems,
-      },
-      {
-        id: "project" as const,
-        title: "Project Rules",
-        items: projectItems,
-      },
-    ];
-  }, [ruleFiles, rulesSearchQuery, selectedRuleId, skillPlatformOrder]);
+  useEffect(() => {
+    if (pluginSelectedTab === "market") {
+      setIsPluginStoreGroupExpanded(true);
+    }
+  }, [pluginSelectedTab]);
 
-  const handleAddRuleProject = useCallback(async () => {
-    const selectedPath = await window.electron?.selectFolder?.();
-    if (!selectedPath) {
+  useEffect(() => {
+    if (
+      activeModule !== "skill" ||
+      !runtimeCapabilities.skillLocalScan ||
+      !window.api?.skill
+    ) {
+      setDetectedSkillAgentCount(null);
       return;
     }
 
-    const segments = selectedPath.split(/[\\/]/).filter(Boolean);
-    const fallbackName = segments.at(-1) || selectedPath;
+    let disposed = false;
+    const loadAgentCount = async () => {
+      try {
+        const [supported, detected] = await Promise.all([
+          window.api.skill.getSupportedPlatforms(),
+          window.api.skill.detectPlatforms(),
+        ]);
+        if (disposed) {
+          return;
+        }
+        setDetectedSkillAgentCount(
+          filterDetectedPlatforms(supported, detected, disabledPlatformIds)
+            .length,
+        );
+      } catch {
+        if (!disposed) {
+          setDetectedSkillAgentCount(null);
+        }
+      }
+    };
 
-    try {
-      await addRuleProject({
-        name: fallbackName,
-        rootPath: selectedPath,
-      });
-    } catch (error) {
-      console.warn("Failed to add rule project:", error);
+    void loadAgentCount();
+    return () => {
+      disposed = true;
+    };
+  }, [activeModule, disabledPlatformIds, runtimeCapabilities.skillLocalScan]);
+  const visibleDesktopModules = useMemo(() => {
+    const normalized = desktopHomeModules.filter((moduleId) =>
+      DESKTOP_HOME_MODULES.includes(moduleId),
+    );
+    const isLegacyDefault =
+      normalized.includes("prompt") &&
+      normalized.includes("skill") &&
+      normalized.includes("rules") &&
+      (!normalized.includes("mcp") || !normalized.includes("plugin"));
+    if (!isLegacyDefault) {
+      return normalized;
     }
-  }, [addRuleProject]);
-
-  const handleRemoveRuleProject = useCallback(
-    async (projectId: string) => {
-      await removeRuleProject(projectId);
-    },
-    [removeRuleProject],
-  );
-  const toggleRuleSection = useCallback((sectionId: "global" | "project") => {
-    setCollapsedRuleSections((current) => ({
-      ...current,
-      [sectionId]: !current[sectionId],
-    }));
-  }, []);
+    const next = [...normalized];
+    if (!next.includes("mcp")) {
+      const skillIndex = next.indexOf("skill");
+      next.splice(skillIndex === -1 ? next.length : skillIndex + 1, 0, "mcp");
+    }
+    if (!next.includes("plugin")) {
+      const mcpIndex = next.indexOf("mcp");
+      next.splice(mcpIndex === -1 ? next.length : mcpIndex + 1, 0, "plugin");
+    }
+    return next;
+  }, [desktopHomeModules]);
+  const hasVisibleModule = visibleDesktopModules.length > 0;
+  const isPromptModuleVisible = visibleDesktopModules.includes("prompt");
+  const isSkillModuleVisible = visibleDesktopModules.includes("skill");
+  const isMcpModuleVisible = visibleDesktopModules.includes("mcp");
+  const isPluginModuleVisible = visibleDesktopModules.includes("plugin");
+  const isRulesModuleVisible = visibleDesktopModules.includes("rules");
   const showRail = layout !== "panel";
   const showPanel = layout !== "rail";
   const railWidthClass = "w-20";
@@ -449,6 +537,124 @@ export function Sidebar({
       ),
     );
   }, [t]);
+
+  const openSkillStoreSource = useCallback(
+    (sourceId: string) => {
+      if (!confirmLeaveDirtySkillEditor()) {
+        return;
+      }
+
+      setIsSkillStoreGroupExpanded(true);
+      setStoreView("store");
+      selectSkill(null);
+      selectStoreSource(sourceId);
+      if (currentPage !== "home") onNavigate("home");
+    },
+    [
+      confirmLeaveDirtySkillEditor,
+      currentPage,
+      onNavigate,
+      selectSkill,
+      selectStoreSource,
+      setStoreView,
+    ],
+  );
+
+  const handleSkillStoreNavClick = useCallback(() => {
+    if (
+      isSkillStoreGroupExpanded &&
+      storeView === "store" &&
+      currentPage === "home"
+    ) {
+      setIsSkillStoreGroupExpanded(false);
+      return;
+    }
+
+    openSkillStoreSource(selectedStoreSourceId || "official");
+  }, [
+    currentPage,
+    isSkillStoreGroupExpanded,
+    openSkillStoreSource,
+    selectedStoreSourceId,
+    storeView,
+  ]);
+
+  const openMcpStoreSource = useCallback(
+    (sourceId = mcpMarketSources[0]?.id ?? "modelcontextprotocol") => {
+      setIsMcpStoreGroupExpanded(true);
+      setMcpSelectedMarketSourceId(sourceId);
+      setMcpSelectedTab("market");
+      if (currentPage !== "home") onNavigate("home");
+    },
+    [
+      currentPage,
+      mcpMarketSources,
+      onNavigate,
+      setMcpSelectedMarketSourceId,
+      setMcpSelectedTab,
+    ],
+  );
+
+  const handleMcpStoreNavClick = useCallback(() => {
+    if (
+      isMcpStoreGroupExpanded &&
+      mcpSelectedTab === "market" &&
+      currentPage === "home"
+    ) {
+      setIsMcpStoreGroupExpanded(false);
+      return;
+    }
+
+    openMcpStoreSource(
+      mcpMarketSources.some(
+        (source) => source.id === mcpSelectedMarketSourceId,
+      )
+        ? mcpSelectedMarketSourceId
+        : mcpMarketSources[0]?.id,
+    );
+  }, [
+    currentPage,
+    isMcpStoreGroupExpanded,
+    mcpMarketSources,
+    mcpSelectedMarketSourceId,
+    mcpSelectedTab,
+    openMcpStoreSource,
+  ]);
+
+  const openPluginStoreSource = useCallback(
+    (sourceId?: string) => {
+      if (sourceId) {
+        setPluginSelectedMarketSourceId(sourceId);
+      }
+      setIsPluginStoreGroupExpanded(true);
+      setPluginSelectedTab("market");
+      if (currentPage !== "home") onNavigate("home");
+    },
+    [
+      currentPage,
+      onNavigate,
+      setPluginSelectedMarketSourceId,
+      setPluginSelectedTab,
+    ],
+  );
+
+  const handlePluginStoreNavClick = useCallback(() => {
+    if (
+      isPluginStoreGroupExpanded &&
+      pluginSelectedTab === "market" &&
+      currentPage === "home"
+    ) {
+      setIsPluginStoreGroupExpanded(false);
+      return;
+    }
+
+    openPluginStoreSource();
+  }, [
+    currentPage,
+    isPluginStoreGroupExpanded,
+    openPluginStoreSource,
+    pluginSelectedTab,
+  ]);
 
   // Skill tags section settings (mirrors prompt tags behavior)
   const skillTagsSectionHeight = useSettingsStore(
@@ -498,6 +704,14 @@ export function Sidebar({
       return;
     }
 
+    if (activeModule === "mcp" && isMcpModuleVisible) {
+      return;
+    }
+
+    if (activeModule === "plugin" && isPluginModuleVisible) {
+      return;
+    }
+
     if (activeModule === "rules" && isRulesModuleVisible) {
       return;
     }
@@ -510,21 +724,13 @@ export function Sidebar({
     activeModule,
     hasVisibleModule,
     isPromptModuleVisible,
+    isMcpModuleVisible,
+    isPluginModuleVisible,
     isRulesModuleVisible,
     isSkillModuleVisible,
     setAppModule,
     visibleDesktopModules,
   ]);
-
-  useEffect(() => {
-    if (activeModule !== "rules") {
-      return;
-    }
-    if (ruleFiles.length > 0) {
-      return;
-    }
-    void loadRuleFiles();
-  }, [activeModule, loadRuleFiles, ruleFiles.length]);
 
   useEffect(() => {
     return () => {
@@ -580,6 +786,34 @@ export function Sidebar({
             active: activeModule === "skill",
             onClick: () => {
               setAppModule("skill");
+              closeTagPopover();
+              if (currentPage !== "home") onNavigate("home");
+            },
+          };
+        }
+
+        if (moduleId === "mcp") {
+          return {
+            key: moduleId,
+            label: t("mcp.title", "MCP"),
+            icon: <ServerIcon className="h-5 w-5" />,
+            active: activeModule === "mcp",
+            onClick: () => {
+              setAppModule("mcp");
+              closeTagPopover();
+              if (currentPage !== "home") onNavigate("home");
+            },
+          };
+        }
+
+        if (moduleId === "plugin") {
+          return {
+            key: moduleId,
+            label: t("plugin.title", "Plugins"),
+            icon: <PackageIcon className="h-5 w-5" />,
+            active: activeModule === "plugin",
+            onClick: () => {
+              setAppModule("plugin");
               closeTagPopover();
               if (currentPage !== "home") onNavigate("home");
             },
@@ -760,8 +994,10 @@ export function Sidebar({
             <div className="flex flex-1 flex-col gap-2">
               {railNavItems.map((item) => (
                 <button
+                  type="button"
                   key={item.key}
                   onClick={item.onClick}
+                  aria-label={item.label}
                   title={item.label}
                   className={`flex flex-col items-center justify-center gap-1.5 rounded-2xl px-2 py-3 text-[11px] font-medium transition-colors titlebar-no-drag ${
                     item.active
@@ -770,6 +1006,7 @@ export function Sidebar({
                   }`}
                 >
                   <span
+                    aria-hidden="true"
                     className={`flex h-9 w-9 items-center justify-center rounded-2xl ${item.active ? "bg-white/10" : "bg-transparent"}`}
                   >
                     {item.icon}
@@ -785,6 +1022,7 @@ export function Sidebar({
               <div className="flex items-center justify-center titlebar-no-drag">
                 <button
                   type="button"
+                  aria-label={t("header.settings")}
                   title={t("header.settings")}
                   onClick={() => {
                     if (!confirmLeaveDirtySkillEditor()) {
@@ -798,7 +1036,7 @@ export function Sidebar({
                       : "text-sidebar-foreground/60 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground"
                   }`}
                 >
-                  <SettingsIcon className="h-5 w-5" />
+                  <SettingsIcon className="h-5 w-5" aria-hidden="true" />
                 </button>
               </div>
             </div>
@@ -818,61 +1056,82 @@ export function Sidebar({
                     <div className="mb-2">
                       <div className="grid grid-cols-3 gap-1 p-1 bg-sidebar-accent/40 rounded-lg">
                         <button
-                          onClick={() => {
-                            setPromptTypeFilter("all");
-                            selectFolder(null);
-                            if (currentPage !== "home") onNavigate("home");
-                          }}
+                          type="button"
+                          onClick={() => openPromptTypeFilter("all")}
+                          aria-pressed={
+                            selectedFolderId === null &&
+                            currentPage === "home" &&
+                            promptTypeFilter === "all" &&
+                            promptViewMode !== "graph"
+                          }
                           className={`flex flex-col items-center justify-center py-2 rounded-md transition-all duration-base ${
                             selectedFolderId === null &&
                             currentPage === "home" &&
-                            promptTypeFilter === "all"
+                            promptTypeFilter === "all" &&
+                            promptViewMode !== "graph"
                               ? "app-wallpaper-surface-strong shadow-sm text-primary"
                               : "text-muted-foreground hover:bg-sidebar-accent app-background-mode-image:hover:bg-foreground/10 hover:text-foreground"
                           }`}
                           title={t("nav.allPrompts")}
                         >
-                          <LayoutGridIcon className="w-4 h-4 mb-1" />
+                          <LayoutGridIcon
+                            className="w-4 h-4 mb-1"
+                            aria-hidden="true"
+                          />
                           <span className="text-[10px] font-medium leading-none">
                             {t("filter.all", "全部")}
                           </span>
                         </button>
                         <button
-                          onClick={() => {
-                            setPromptTypeFilter("text");
-                            selectFolder(null);
-                            if (currentPage !== "home") onNavigate("home");
-                          }}
+                          type="button"
+                          onClick={() => openPromptTypeFilter("text")}
+                          aria-pressed={
+                            selectedFolderId === null &&
+                            currentPage === "home" &&
+                            promptTypeFilter === "text" &&
+                            promptViewMode !== "graph"
+                          }
                           className={`flex flex-col items-center justify-center py-2 rounded-md transition-all duration-base ${
                             selectedFolderId === null &&
                             currentPage === "home" &&
-                            promptTypeFilter === "text"
+                            promptTypeFilter === "text" &&
+                            promptViewMode !== "graph"
                               ? "app-wallpaper-surface-strong shadow-sm text-primary"
                               : "text-muted-foreground hover:bg-sidebar-accent app-background-mode-image:hover:bg-foreground/10 hover:text-foreground"
                           }`}
                           title={t("nav.textPrompts", "文本提示词")}
                         >
-                          <MessageSquareTextIcon className="w-4 h-4 mb-1" />
+                          <MessageSquareTextIcon
+                            className="w-4 h-4 mb-1"
+                            aria-hidden="true"
+                          />
                           <span className="text-[10px] font-medium leading-none">
                             {t("filter.text", "文本")}
                           </span>
                         </button>
                         <button
-                          onClick={() => {
-                            setPromptTypeFilter("image");
-                            selectFolder(null);
-                            if (currentPage !== "home") onNavigate("home");
-                          }}
+                          type="button"
+                          onClick={() => openPromptTypeFilter("image")}
+                          aria-pressed={
+                            selectedFolderId === null &&
+                            currentPage === "home" &&
+                            promptTypeFilter === "image" &&
+                            promptViewMode !== "graph"
+                          }
                           className={`flex flex-col items-center justify-center py-2 rounded-md transition-all duration-base ${
                             selectedFolderId === null &&
                             currentPage === "home" &&
-                            promptTypeFilter === "image"
+                            promptTypeFilter === "image" &&
+                            promptViewMode !== "graph"
                               ? "app-wallpaper-surface-strong shadow-sm text-primary"
                               : "text-muted-foreground hover:bg-sidebar-accent app-background-mode-image:hover:bg-foreground/10 hover:text-foreground"
                           }`}
                           title={t("nav.imagePrompts", "绘图提示词")}
                         >
-                          <ImageIcon className="w-4 h-4 mb-1" />
+                          <ImageIcon
+                            className="w-4 h-4 mb-1"
+                            aria-hidden="true"
+                          />
                           <span className="text-[10px] font-medium leading-none">
                             {t("filter.image", "绘图")}
                           </span>
@@ -888,14 +1147,11 @@ export function Sidebar({
                         active={
                           selectedFolderId === null &&
                           currentPage === "home" &&
-                          promptTypeFilter === "all"
+                          promptTypeFilter === "all" &&
+                          promptViewMode !== "graph"
                         }
                         collapsed={true}
-                        onClick={() => {
-                          setPromptTypeFilter("all");
-                          selectFolder(null);
-                          if (currentPage !== "home") onNavigate("home");
-                        }}
+                        onClick={() => openPromptTypeFilter("all")}
                       />
                       <NavItem
                         icon={<MessageSquareTextIcon className="w-5 h-5" />}
@@ -904,14 +1160,11 @@ export function Sidebar({
                         active={
                           promptTypeFilter === "text" &&
                           selectedFolderId === null &&
-                          currentPage === "home"
+                          currentPage === "home" &&
+                          promptViewMode !== "graph"
                         }
                         collapsed={true}
-                        onClick={() => {
-                          setPromptTypeFilter("text");
-                          selectFolder(null);
-                          if (currentPage !== "home") onNavigate("home");
-                        }}
+                        onClick={() => openPromptTypeFilter("text")}
                       />
                       <NavItem
                         icon={<ImageIcon className="w-5 h-5" />}
@@ -920,14 +1173,11 @@ export function Sidebar({
                         active={
                           promptTypeFilter === "image" &&
                           selectedFolderId === null &&
-                          currentPage === "home"
+                          currentPage === "home" &&
+                          promptViewMode !== "graph"
                         }
                         collapsed={true}
-                        onClick={() => {
-                          setPromptTypeFilter("image");
-                          selectFolder(null);
-                          if (currentPage !== "home") onNavigate("home");
-                        }}
+                        onClick={() => openPromptTypeFilter("image")}
                       />
                     </div>
                   )}
@@ -936,13 +1186,22 @@ export function Sidebar({
                     label={t("nav.favorites")}
                     count={favoriteCount}
                     active={
-                      selectedFolderId === "favorites" && currentPage === "home"
+                      selectedFolderId === "favorites" &&
+                      currentPage === "home" &&
+                      promptViewMode !== "graph"
                     }
                     collapsed={isCollapsed}
-                    onClick={() => {
-                      selectFolder("favorites");
-                      if (currentPage !== "home") onNavigate("home");
-                    }}
+                    onClick={() => openPromptFolder("favorites")}
+                  />
+                  <NavItem
+                    icon={<GitBranchIcon className="w-5 h-5" />}
+                    label={t("nav.relationshipGraph")}
+                    count={promptStats.totalCount}
+                    active={
+                      promptViewMode === "graph" && currentPage === "home"
+                    }
+                    collapsed={isCollapsed}
+                    onClick={openRelationshipGraph}
                   />
                 </div>
               </div>
@@ -957,13 +1216,16 @@ export function Sidebar({
                         {t("nav.folders")}
                       </span>
                       <button
+                        type="button"
                         onClick={() => {
                           setEditingFolder(null);
                           setIsFolderModalOpen(true);
                         }}
                         className="p-1.5 rounded-lg hover:bg-sidebar-accent text-sidebar-foreground/50 hover:text-primary transition-colors"
+                        title={t("folder.create")}
+                        aria-label={t("folder.create")}
                       >
-                        <PlusIcon className="w-4 h-4" />
+                        <PlusIcon className="w-4 h-4" aria-hidden="true" />
                       </button>
                     </div>
                   )}
@@ -974,6 +1236,7 @@ export function Sidebar({
                   <div className="flex-1 overflow-y-auto overflow-x-hidden scrollbar-hide px-3 pb-4">
                     <SortableTree
                       folders={folders}
+                      folderPromptCounts={folderPromptCounts}
                       selectedFolderId={selectedFolderId}
                       expandedIds={expandedIds}
                       unlockedFolderIds={unlockedFolderIds}
@@ -987,8 +1250,7 @@ export function Sidebar({
                           setPasswordFolder(folder);
                           setIsPasswordModalOpen(true);
                         } else {
-                          selectFolder(folder.id);
-                          if (currentPage !== "home") onNavigate("home");
+                          openPromptFolder(folder.id);
                         }
                       }}
                       onEditFolder={(folder) => {
@@ -1028,28 +1290,41 @@ export function Sidebar({
                     {!isCollapsed && (
                       <div className="flex items-center justify-between px-6 py-2 border-t border-sidebar-border/50 shrink-0">
                         <button
+                          type="button"
                           onClick={() => setIsTagsCollapsed(!isTagsCollapsed)}
+                          aria-expanded={!isTagsCollapsed}
                           className="flex items-center gap-1 text-xs font-semibold text-sidebar-foreground/50 uppercase tracking-wider hover:text-sidebar-foreground/80 transition-colors"
                         >
                           {isTagsCollapsed ? (
-                            <ChevronUpIcon className="w-3 h-3" />
+                            <ChevronUpIcon
+                              className="w-3 h-3"
+                              aria-hidden="true"
+                            />
                           ) : (
-                            <ChevronDownIcon className="w-3 h-3" />
+                            <ChevronDownIcon
+                              className="w-3 h-3"
+                              aria-hidden="true"
+                            />
                           )}
                           {t("nav.tags")}
                         </button>
                         {!isTagsCollapsed && (
                           <div className="flex items-center gap-2">
                             <button
+                              type="button"
                               onClick={() => setTagManagerScope("prompt")}
                               className="text-sidebar-foreground/50 hover:text-sidebar-foreground/80 transition-colors"
                               title={t("common.edit", "Edit")}
                               aria-label={t("common.edit", "Edit")}
                             >
-                              <SettingsIcon className="w-3.5 h-3.5" />
+                              <SettingsIcon
+                                className="w-3.5 h-3.5"
+                                aria-hidden="true"
+                              />
                             </button>
                             {uniqueTags.length > 8 && (
                               <button
+                                type="button"
                                 onClick={() => setShowAllTags(!showAllTags)}
                                 className="text-xs text-primary hover:underline"
                               >
@@ -1072,6 +1347,7 @@ export function Sidebar({
                               : uniqueTags.slice(0, 8)
                             ).map((tag, index) => (
                               <button
+                                type="button"
                                 key={tag}
                                 draggable
                                 onDragStart={handlePromptTagDragStart(tag)}
@@ -1089,7 +1365,10 @@ export function Sidebar({
                                     : "bg-sidebar-accent text-sidebar-foreground/70 hover:bg-primary hover:text-white"
                                 }`}
                               >
-                                <HashIcon className="w-3 h-3" />
+                                <HashIcon
+                                  className="w-3 h-3"
+                                  aria-hidden="true"
+                                />
                                 {tag}
                               </button>
                             ))}
@@ -1099,6 +1378,7 @@ export function Sidebar({
                     ) : (
                       <div className="pt-2 border-t border-sidebar-border/50 flex flex-col items-center gap-2 pb-2">
                         <button
+                          type="button"
                           ref={tagButtonRef}
                           onClick={() => {
                             if (isTagPopoverOpen) {
@@ -1109,13 +1389,14 @@ export function Sidebar({
                             }
                           }}
                           title={t("nav.tags")}
+                          aria-expanded={isTagPopoverOpen}
                           className={`w-10 h-10 flex flex-col items-center justify-center rounded-lg transition-colors duration-base ${
                             filterTags.length > 0 && currentPage === "home"
                               ? "bg-primary text-white"
                               : "bg-sidebar-accent text-sidebar-foreground/70 hover:bg-primary hover:text-white"
                           }`}
                         >
-                          <HashIcon className="w-4 h-4" />
+                          <HashIcon className="w-4 h-4" aria-hidden="true" />
                           <span className="text-[10px] leading-none mt-0.5">
                             {filterTags.length > 0
                               ? filterTags.length
@@ -1152,8 +1433,10 @@ export function Sidebar({
                       <div className="flex items-center gap-2">
                         {filterTags.length > 0 && (
                           <button
+                            type="button"
                             onClick={() => {
                               clearFilterTags();
+                              setPromptViewMode("card");
                               if (currentPage !== "home") onNavigate("home");
                             }}
                             className="text-xs text-primary hover:underline"
@@ -1162,10 +1445,12 @@ export function Sidebar({
                           </button>
                         )}
                         <button
+                          type="button"
                           onClick={closeTagPopover}
                           className="p-1 rounded-lg text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+                          aria-label={t("common.close", "Close")}
                         >
-                          <XIcon className="w-4 h-4" />
+                          <XIcon className="w-4 h-4" aria-hidden="true" />
                         </button>
                       </div>
                     </div>
@@ -1176,6 +1461,7 @@ export function Sidebar({
                             filterTags.includes(tag) && currentPage === "home";
                           return (
                             <button
+                              type="button"
                               key={tag}
                               onClick={() => {
                                 handlePromptTagClick(tag);
@@ -1186,7 +1472,10 @@ export function Sidebar({
                                   : "app-wallpaper-surface text-foreground/80 hover:bg-primary hover:text-white"
                               }`}
                             >
-                              <HashIcon className="w-4 h-4" />
+                              <HashIcon
+                                className="w-4 h-4"
+                                aria-hidden="true"
+                              />
                               <span className="truncate max-w-[14rem]">
                                 {tag}
                               </span>
@@ -1209,8 +1498,8 @@ export function Sidebar({
                     label={t("nav.mySkills", "我的 Skills")}
                     count={skills.length}
                     active={
-                      skillFilterType === "all" &&
-                      storeView === "my-skills" &&
+                      (storeView === "distribution" ||
+                        storeView === "my-skills") &&
                       currentPage === "home"
                     }
                     collapsed={isCollapsed}
@@ -1223,71 +1512,33 @@ export function Sidebar({
                     }}
                   />
                   {runtimeCapabilities.skillLocalScan && (
-                    <NavItem
-                      icon={<FolderPlusIcon className="w-5 h-5" />}
-                      label={t("nav.projects", "Projects")}
-                      count={skillProjects.length}
-                      active={
-                        storeView === "projects" && currentPage === "home"
-                      }
-                      collapsed={isCollapsed}
-                      onClick={() => {
-                        if (!confirmLeaveDirtySkillEditor()) return;
-                        setStoreView("projects");
-                        selectSkill(null);
-                        if (currentPage !== "home") onNavigate("home");
-                      }}
-                    />
-                  )}
-                  <NavItem
-                    icon={<StarIcon className="w-5 h-5" />}
-                    label={t("nav.favorites")}
-                    count={skillStats.favoriteCount}
-                    active={
-                      skillFilterType === "favorites" &&
-                      storeView === "my-skills" &&
-                      currentPage === "home"
-                    }
-                    collapsed={isCollapsed}
-                    onClick={() => {
-                      if (!confirmLeaveDirtySkillEditor()) return;
-                      setSkillFilterType("favorites");
-                      setStoreView("my-skills");
-                      selectSkill(null);
-                      if (currentPage !== "home") onNavigate("home");
-                    }}
-                  />
-                  {runtimeCapabilities.skillDistribution && (
                     <>
                       <NavItem
-                        icon={<GlobeIcon className="w-5 h-5" />}
-                        label={t("skill.deployed", "已分发")}
-                        count={skillStats.deployedCount}
+                        icon={<FolderPlusIcon className="w-5 h-5" />}
+                        label={t("nav.projects", "Projects")}
+                        count={skillProjects.length}
                         active={
-                          storeView === "distribution" && currentPage === "home"
+                          storeView === "projects" && currentPage === "home"
                         }
                         collapsed={isCollapsed}
                         onClick={() => {
                           if (!confirmLeaveDirtySkillEditor()) return;
-                          setStoreView("distribution");
+                          setStoreView("projects");
                           selectSkill(null);
                           if (currentPage !== "home") onNavigate("home");
                         }}
                       />
                       <NavItem
-                        icon={<Clock3Icon className="w-5 h-5" />}
-                        label={t("skill.pendingDeployment", "待分发")}
-                        count={skillStats.pendingCount}
+                        icon={<BotIcon className="w-5 h-5" />}
+                        label={t("nav.agentSkills", "Agent Skills")}
+                        count={visibleSkillAgentCount}
                         active={
-                          skillFilterType === "pending" &&
-                          storeView === "my-skills" &&
-                          currentPage === "home"
+                          storeView === "agents" && currentPage === "home"
                         }
                         collapsed={isCollapsed}
                         onClick={() => {
                           if (!confirmLeaveDirtySkillEditor()) return;
-                          setSkillFilterType("pending");
-                          setStoreView("my-skills");
+                          setStoreView("agents");
                           selectSkill(null);
                           if (currentPage !== "home") onNavigate("home");
                         }}
@@ -1302,137 +1553,175 @@ export function Sidebar({
                         label={t("nav.skillStore", "Skill 商店")}
                         active={storeView === "store" && currentPage === "home"}
                         collapsed={isCollapsed}
-                        onClick={() => {
-                          if (!confirmLeaveDirtySkillEditor()) return;
-                          setStoreView("store");
-                          selectSkill(null);
-                          selectStoreSource(
-                            selectedStoreSourceId || "official",
-                          );
-                          if (currentPage !== "home") onNavigate("home");
-                        }}
+                        onClick={handleSkillStoreNavClick}
                       />
                     </>
                   )}
-                  {runtimeCapabilities.skillStore &&
-                    storeView === "store" &&
-                    !isCollapsed && (
-                      <div className="ml-4 pl-3 mt-1 border-l border-sidebar-border/50 space-y-1">
-                        <button
-                          onClick={() => {
-                            selectStoreSource("official");
-                            if (currentPage !== "home") onNavigate("home");
-                          }}
-                          className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors ${
-                            selectedStoreSourceId === "official"
-                              ? "bg-sidebar-accent text-sidebar-foreground"
-                              : "text-sidebar-foreground/60 hover:bg-sidebar-accent/40 hover:text-sidebar-foreground"
-                          }`}
-                        >
-                          <StoreIcon className="w-4 h-4" />
-                          <span className="flex-1 text-left truncate">
-                            {t("skill.officialStore", "官方商店")}
-                          </span>
-                          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-sidebar-accent/80 text-sidebar-foreground/50 border border-white/5">
-                            {BUILTIN_SKILL_REGISTRY.length}
-                          </span>
-                        </button>
-                        <button
-                          onClick={() => {
-                            selectStoreSource("claude-code");
-                            if (currentPage !== "home") onNavigate("home");
-                          }}
-                          className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors ${
-                            selectedStoreSourceId === "claude-code"
-                              ? "bg-sidebar-accent text-sidebar-foreground"
-                              : "text-sidebar-foreground/60 hover:bg-sidebar-accent/40 hover:text-sidebar-foreground"
-                          }`}
-                        >
-                          <GlobeIcon className="w-4 h-4" />
-                          <span className="flex-1 text-left truncate">
-                            {t("skill.claudeCodeStore", "Claude Code 商店")}
-                          </span>
-                          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-sidebar-accent/80 text-sidebar-foreground/50 border border-white/5">
-                            {claudeCodeStoreCount}
-                          </span>
-                        </button>
-                        <button
-                          onClick={() => {
-                            selectStoreSource("openai-codex");
-                            if (currentPage !== "home") onNavigate("home");
-                          }}
-                          className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors ${
-                            selectedStoreSourceId === "openai-codex"
-                              ? "bg-sidebar-accent text-sidebar-foreground"
-                              : "text-sidebar-foreground/60 hover:bg-sidebar-accent/40 hover:text-sidebar-foreground"
-                          }`}
-                        >
-                          <GlobeIcon className="w-4 h-4" />
-                          <span className="flex-1 text-left truncate">
-                            {t("skill.openaiCodexStore", "OpenAI Codex 商店")}
-                          </span>
-                          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-sidebar-accent/80 text-sidebar-foreground/50 border border-white/5">
-                            {openAiCodexStoreCount}
-                          </span>
-                        </button>
-                        {customStoreSources.map((source) => (
-                          <button
-                            key={source.id}
-                            onClick={() => {
-                              selectStoreSource(source.id);
-                              if (currentPage !== "home") onNavigate("home");
-                            }}
-                            className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors ${
-                              selectedStoreSourceId === source.id
-                                ? "bg-sidebar-accent text-sidebar-foreground"
-                                : "text-sidebar-foreground/60 hover:bg-sidebar-accent/40 hover:text-sidebar-foreground"
-                            }`}
-                          >
-                            <LinkIcon className="w-4 h-4" />
-                            <span className="flex-1 text-left truncate">
-                              {source.name}
-                            </span>
-                            {remoteStoreEntries[source.id]?.skills.length ? (
-                              <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-sidebar-accent/80 text-sidebar-foreground/50 border border-white/5">
-                                {remoteStoreEntries[source.id]?.skills.length}
-                              </span>
-                            ) : null}
-                            {!source.enabled && (
-                              <span className="text-[10px] text-sidebar-foreground/40">
-                                {t("common.disabled", "停用")}
-                              </span>
-                            )}
-                          </button>
-                        ))}
-                        <button
-                          onClick={() => {
-                            selectStoreSource("new-custom");
-                            if (currentPage !== "home") onNavigate("home");
-                          }}
-                          className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg border border-dashed text-sm transition-colors ${
-                            selectedStoreSourceId === "new-custom"
-                              ? "border-primary text-primary bg-primary/5"
-                              : "border-sidebar-border/70 text-sidebar-foreground/50 hover:border-primary/50 hover:text-sidebar-foreground hover:bg-sidebar-accent/20"
-                          }`}
-                        >
-                          <PlusIcon className="w-4 h-4" />
-                          <span className="truncate">
-                            {t("skill.addStoreSource", "添加商店")}
-                          </span>
-                        </button>
-                      </div>
-                    )}
                 </div>
               </div>
 
-              {/* Skill Tags Section - Mirrors prompt tags behavior (resize, collapse, popover) */}
+              {/* Skill body area - store sources scroll above fixed/resizable tags */}
               <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
-                {/* Spacer to push tags to bottom */}
-                <div className="flex-1" />
+                {runtimeCapabilities.skillStore &&
+                isSkillStoreGroupExpanded &&
+                !isCollapsed ? (
+                  <div
+                    data-testid="skill-store-source-scroll"
+                    className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden scrollbar-hide px-3 pb-3"
+                  >
+                    <div className="ml-4 mt-1 pl-3 pr-1 border-l border-sidebar-border/50 space-y-1">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          openSkillStoreSource("official");
+                        }}
+                        className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors ${
+                          selectedStoreSourceId === "official"
+                            ? "bg-sidebar-accent text-sidebar-foreground"
+                            : "text-sidebar-foreground/60 hover:bg-sidebar-accent/40 hover:text-sidebar-foreground"
+                        }`}
+                      >
+                        <StoreIcon className="w-4 h-4" aria-hidden="true" />
+                        <span className="flex-1 text-left truncate">
+                          {t("skill.officialStore", "官方商店")}
+                        </span>
+                        <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-sidebar-accent/80 text-sidebar-foreground/50 border border-white/5">
+                          0
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          openSkillStoreSource("claude-code");
+                        }}
+                        className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors ${
+                          selectedStoreSourceId === "claude-code"
+                            ? "bg-sidebar-accent text-sidebar-foreground"
+                            : "text-sidebar-foreground/60 hover:bg-sidebar-accent/40 hover:text-sidebar-foreground"
+                        }`}
+                      >
+                        <StoreIcon className="w-4 h-4" aria-hidden="true" />
+                        <span className="flex-1 text-left truncate">
+                          {t("skill.claudeCodeStore", "Claude Code 商店")}
+                        </span>
+                        <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-sidebar-accent/80 text-sidebar-foreground/50 border border-white/5">
+                          {claudeCodeStoreCount}
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          openSkillStoreSource("openai-codex");
+                        }}
+                        className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors ${
+                          selectedStoreSourceId === "openai-codex"
+                            ? "bg-sidebar-accent text-sidebar-foreground"
+                            : "text-sidebar-foreground/60 hover:bg-sidebar-accent/40 hover:text-sidebar-foreground"
+                        }`}
+                      >
+                        <StoreIcon className="w-4 h-4" aria-hidden="true" />
+                        <span className="flex-1 text-left truncate">
+                          {t("skill.openaiCodexStore", "OpenAI Codex 商店")}
+                        </span>
+                        <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-sidebar-accent/80 text-sidebar-foreground/50 border border-white/5">
+                          {openAiCodexStoreCount}
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          openSkillStoreSource("community");
+                        }}
+                        className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors ${
+                          selectedStoreSourceId === "community"
+                            ? "bg-sidebar-accent text-sidebar-foreground"
+                            : "text-sidebar-foreground/60 hover:bg-sidebar-accent/40 hover:text-sidebar-foreground"
+                        }`}
+                      >
+                        <StoreIcon className="w-4 h-4" aria-hidden="true" />
+                        <span className="flex-1 text-left truncate">
+                          {t("skill.communityStore", "Community Store")}
+                        </span>
+                        <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-sidebar-accent/80 text-sidebar-foreground/50 border border-white/5">
+                          {communityStoreCount}
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          openSkillStoreSource("clawhub");
+                        }}
+                        className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors ${
+                          selectedStoreSourceId === "clawhub"
+                            ? "bg-sidebar-accent text-sidebar-foreground"
+                            : "text-sidebar-foreground/60 hover:bg-sidebar-accent/40 hover:text-sidebar-foreground"
+                        }`}
+                      >
+                        <StoreIcon className="w-4 h-4" aria-hidden="true" />
+                        <span className="flex-1 text-left truncate">
+                          {t("skill.clawHubStore", "ClawHub 商店")}
+                        </span>
+                        <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-sidebar-accent/80 text-sidebar-foreground/50 border border-white/5">
+                          {clawHubStoreCount}
+                        </span>
+                      </button>
+                      {customStoreSources.map((source) => (
+                        <button
+                          type="button"
+                          key={source.id}
+                          onClick={() => {
+                            openSkillStoreSource(source.id);
+                          }}
+                          className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors ${
+                            selectedStoreSourceId === source.id
+                              ? "bg-sidebar-accent text-sidebar-foreground"
+                              : "text-sidebar-foreground/60 hover:bg-sidebar-accent/40 hover:text-sidebar-foreground"
+                          }`}
+                        >
+                          <LinkIcon className="w-4 h-4" aria-hidden="true" />
+                          <span className="flex-1 text-left truncate">
+                            {source.name}
+                          </span>
+                          {getRemoteStoreSkillCount(
+                            remoteStoreEntries[source.id],
+                          ) ? (
+                            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-sidebar-accent/80 text-sidebar-foreground/50 border border-white/5">
+                              {getRemoteStoreSkillCount(
+                                remoteStoreEntries[source.id],
+                              )}
+                            </span>
+                          ) : null}
+                          {!source.enabled && (
+                            <span className="text-[10px] text-sidebar-foreground/40">
+                              {t("common.disabled", "停用")}
+                            </span>
+                          )}
+                        </button>
+                      ))}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          openSkillStoreSource("new-custom");
+                        }}
+                        className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg border border-dashed text-sm transition-colors ${
+                          selectedStoreSourceId === "new-custom"
+                            ? "border-primary text-primary bg-primary/5"
+                            : "border-sidebar-border/70 text-sidebar-foreground/50 hover:border-primary/50 hover:text-sidebar-foreground hover:bg-sidebar-accent/20"
+                        }`}
+                      >
+                        <PlusIcon className="w-4 h-4" aria-hidden="true" />
+                        <span className="truncate">
+                          {t("skill.addStoreSource", "添加商店")}
+                        </span>
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex-1" />
+                )}
 
                 {/* Resize Handle */}
-                {storeView !== "projects" &&
-                  uniqueSkillTags.length > 0 &&
+                {shouldShowSkillTags &&
                   !isCollapsed &&
                   !isSkillTagsCollapsed && (
                     <div
@@ -1442,7 +1731,7 @@ export function Sidebar({
                   )}
 
                 {/* Tags Content */}
-                {storeView !== "projects" && uniqueSkillTags.length > 0 && (
+                {shouldShowSkillTags && (
                   <div
                     className={`sidebar-tag-section shrink-0 flex flex-col overflow-hidden app-wallpaper-panel ${isCollapsed ? "items-center" : ""}`}
                     style={{
@@ -1455,30 +1744,43 @@ export function Sidebar({
                     {!isCollapsed && (
                       <div className="flex items-center justify-between px-6 py-2 border-t border-sidebar-border/50 shrink-0">
                         <button
+                          type="button"
                           onClick={() =>
                             setIsSkillTagsCollapsed(!isSkillTagsCollapsed)
                           }
+                          aria-expanded={!isSkillTagsCollapsed}
                           className="flex items-center gap-1 text-xs font-semibold text-sidebar-foreground/50 uppercase tracking-wider hover:text-sidebar-foreground/80 transition-colors"
                         >
                           {isSkillTagsCollapsed ? (
-                            <ChevronUpIcon className="w-3 h-3" />
+                            <ChevronUpIcon
+                              className="w-3 h-3"
+                              aria-hidden="true"
+                            />
                           ) : (
-                            <ChevronDownIcon className="w-3 h-3" />
+                            <ChevronDownIcon
+                              className="w-3 h-3"
+                              aria-hidden="true"
+                            />
                           )}
                           {t("nav.tags")}
                         </button>
                         {!isSkillTagsCollapsed && (
                           <div className="flex items-center gap-2">
                             <button
+                              type="button"
                               onClick={() => setTagManagerScope("skill")}
                               className="text-sidebar-foreground/50 hover:text-sidebar-foreground/80 transition-colors"
                               title={t("common.edit", "Edit")}
                               aria-label={t("common.edit", "Edit")}
                             >
-                              <SettingsIcon className="w-3.5 h-3.5" />
+                              <SettingsIcon
+                                className="w-3.5 h-3.5"
+                                aria-hidden="true"
+                              />
                             </button>
                             {skillFilterTags.length > 0 && (
                               <button
+                                type="button"
                                 onClick={() => clearSkillFilterTags()}
                                 className="text-xs text-primary hover:underline"
                               >
@@ -1487,6 +1789,7 @@ export function Sidebar({
                             )}
                             {uniqueSkillTags.length > 8 && (
                               <button
+                                type="button"
                                 onClick={() =>
                                   setShowAllSkillTags(!showAllSkillTags)
                                 }
@@ -1511,6 +1814,7 @@ export function Sidebar({
                               : uniqueSkillTags.slice(0, 8)
                             ).map((tag, index) => (
                               <button
+                                type="button"
                                 key={tag}
                                 draggable
                                 onDragStart={handlePromptTagDragStart(tag)}
@@ -1531,7 +1835,10 @@ export function Sidebar({
                                     : "bg-sidebar-accent text-sidebar-foreground/70 hover:bg-primary hover:text-white"
                                 }`}
                               >
-                                <HashIcon className="w-3 h-3" />
+                                <HashIcon
+                                  className="w-3 h-3"
+                                  aria-hidden="true"
+                                />
                                 {tag}
                               </button>
                             ))}
@@ -1541,6 +1848,7 @@ export function Sidebar({
                     ) : (
                       <div className="pt-2 border-t border-sidebar-border/50 flex flex-col items-center gap-2 pb-2">
                         <button
+                          type="button"
                           ref={tagButtonRef}
                           onClick={() => {
                             if (isTagPopoverOpen) {
@@ -1551,13 +1859,14 @@ export function Sidebar({
                             }
                           }}
                           title={t("nav.tags")}
+                          aria-expanded={isTagPopoverOpen}
                           className={`w-10 h-10 flex flex-col items-center justify-center rounded-lg transition-colors duration-base ${
                             skillFilterTags.length > 0 && currentPage === "home"
                               ? "bg-primary text-white"
                               : "bg-sidebar-accent text-sidebar-foreground/70 hover:bg-primary hover:text-white"
                           }`}
                         >
-                          <HashIcon className="w-4 h-4" />
+                          <HashIcon className="w-4 h-4" aria-hidden="true" />
                           <span className="text-[10px] leading-none mt-0.5">
                             {skillFilterTags.length > 0
                               ? skillFilterTags.length
@@ -1571,7 +1880,7 @@ export function Sidebar({
               </div>
 
               {/* Skill Tags Popover (collapsed sidebar) */}
-              {storeView !== "projects" && isTagPopoverOpen && (
+              {shouldShowSkillTags && isTagPopoverOpen && (
                 <div
                   ref={tagPopoverRef}
                   className={`fixed z-[9999] transition-all duration-quick ${
@@ -1595,6 +1904,7 @@ export function Sidebar({
                       <div className="flex items-center gap-2">
                         {skillFilterTags.length > 0 && (
                           <button
+                            type="button"
                             onClick={() => {
                               clearSkillFilterTags();
                               if (currentPage !== "home") onNavigate("home");
@@ -1605,10 +1915,12 @@ export function Sidebar({
                           </button>
                         )}
                         <button
+                          type="button"
                           onClick={closeTagPopover}
                           className="p-1 rounded-lg text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+                          aria-label={t("common.close", "Close")}
                         >
-                          <XIcon className="w-4 h-4" />
+                          <XIcon className="w-4 h-4" aria-hidden="true" />
                         </button>
                       </div>
                     </div>
@@ -1620,6 +1932,7 @@ export function Sidebar({
                             currentPage === "home";
                           return (
                             <button
+                              type="button"
                               key={tag}
                               draggable
                               onDragStart={handlePromptTagDragStart(tag)}
@@ -1634,7 +1947,10 @@ export function Sidebar({
                                   : "app-wallpaper-surface text-foreground/80 hover:bg-primary hover:text-white"
                               }`}
                             >
-                              <HashIcon className="w-4 h-4" />
+                              <HashIcon
+                                className="w-4 h-4"
+                                aria-hidden="true"
+                              />
                               <span className="truncate max-w-[14rem]">
                                 {tag}
                               </span>
@@ -1647,176 +1963,171 @@ export function Sidebar({
                 </div>
               )}
             </>
-          ) : (
+          ) : activeModule === "mcp" ? (
             <>
-              <div className="flex-shrink-0 flex flex-col px-3 py-4">
-                <div className="px-2 pb-2">
-                  <div className="text-xs uppercase tracking-[0.18em] text-muted-foreground">
-                    {t("rules.title", "Rules")}
-                  </div>
-                  <div className="mt-2 flex items-center justify-between gap-2">
-                    <h3 className="text-base font-semibold text-foreground">
-                      {t("rules.platformSidebarTitle", "Platforms")}
-                    </h3>
-                    <button
-                      type="button"
-                      onClick={() => void handleRescanRules()}
-                      disabled={isRulesLoading}
-                      className="inline-flex items-center gap-1 rounded-lg border border-border bg-background/70 px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
-                      title={t("rules.rescanAction", "Rescan rules")}
-                    >
-                      <RefreshCwIcon
-                        className={`h-3.5 w-3.5 ${isRulesLoading ? "animate-spin" : ""}`}
-                      />
-                      {isRulesLoading
-                        ? t("rules.rescanWorking", "Scanning...")
-                        : t("rules.rescanShortAction", "Rescan")}
-                    </button>
-                  </div>
+              <div className="flex-shrink-0 flex flex-col px-3 py-2">
+                <div className="space-y-1 shrink-0">
+                  <NavItem
+                    icon={<ServerIcon className="w-5 h-5" />}
+                    label={t("mcp.myMcp", "My MCP")}
+                    count={mcpLibrary?.servers.length ?? 0}
+                    active={mcpSelectedTab === "library"}
+                    collapsed={isCollapsed}
+                    onClick={() => {
+                      setMcpSelectedTab("library");
+                      if (currentPage !== "home") onNavigate("home");
+                    }}
+                  />
+                  <NavItem
+                    icon={<BotIcon className="w-5 h-5" />}
+                    label={t("mcp.agentMcp", "Agent MCP")}
+                    count={mcpTargetPresets.length}
+                    active={mcpSelectedTab === "targets"}
+                    collapsed={isCollapsed}
+                    onClick={() => {
+                      setMcpSelectedTab("targets");
+                      if (currentPage !== "home") onNavigate("home");
+                    }}
+                  />
+                  <div className="h-px app-wallpaper-panel-strong-border/50 my-2" />
+                  <NavItem
+                    icon={<StoreIcon className="w-5 h-5" />}
+                    label={t("mcp.mcpStore", "MCP Store")}
+                    active={mcpSelectedTab === "market"}
+                    collapsed={isCollapsed}
+                    onClick={handleMcpStoreNavClick}
+                  />
                 </div>
               </div>
 
-              <div className="flex-1 overflow-y-auto px-3 pb-4">
-                <div className="space-y-5">
-                  {ruleSidebarSections.map((section) => (
-                    <div key={section.id}>
-                      <div className="mb-2 px-2">
+              <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
+                {isMcpStoreGroupExpanded && !isCollapsed ? (
+                  <div
+                    data-testid="mcp-store-source-scroll"
+                    className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden scrollbar-hide px-3 pb-3"
+                  >
+                    <div className="ml-4 mt-1 pl-3 pr-1 border-l border-sidebar-border/50 space-y-1">
+                      {mcpMarketSources.map((source) => (
                         <button
+                          key={source.id}
                           type="button"
-                          onClick={() => toggleRuleSection(section.id)}
-                          className="flex w-full items-center gap-1 text-left text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground transition-colors hover:text-foreground"
+                          onClick={() => openMcpStoreSource(source.id)}
+                          className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors ${
+                            mcpSelectedTab === "market" &&
+                            mcpSelectedMarketSourceId === source.id
+                              ? "bg-sidebar-accent text-sidebar-foreground"
+                              : "text-sidebar-foreground/60 hover:bg-sidebar-accent/40 hover:text-sidebar-foreground"
+                          }`}
                         >
-                          {collapsedRuleSections[section.id] ? (
-                            <ChevronRightIcon className="h-3.5 w-3.5" />
-                          ) : (
-                            <ChevronDownIcon className="h-3.5 w-3.5" />
-                          )}
-                          <span>
-                            {section.id === "global"
-                              ? t("rules.globalSection", "Global Rules")
-                              : t("rules.projectSection", "Project Rules")}
+                          <StoreIcon className="w-4 h-4" aria-hidden="true" />
+                          <span className="flex-1 text-left truncate">
+                            {source.label}
+                          </span>
+                          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-sidebar-accent/80 text-sidebar-foreground/50 border border-white/5">
+                            {mcpMarketSourceCounts.get(source.id) ?? 0}
                           </span>
                         </button>
-                      </div>
-
-                      {!collapsedRuleSections[section.id] ? (
-                        <div className="space-y-2">
-                          {section.items.map((item) => (
-                            <div
-                              key={item.id}
-                              className={`relative w-full rounded-2xl border px-3 py-3 text-left transition-colors ${
-                                item.active
-                                  ? "border-primary/40 bg-primary/10"
-                                  : "border-border bg-background/60 hover:bg-muted"
-                              }`}
-                            >
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  void selectRule(item.file.id);
-                                  if (currentPage !== "home")
-                                    onNavigate("home");
-                                }}
-                                className="w-full text-left"
-                              >
-                                <div className="flex items-center gap-3">
-                                  <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-muted text-muted-foreground">
-                                    {item.type === "project" ? (
-                                      <FolderPlusIcon className="h-5 w-5" />
-                                    ) : (
-                                      <PlatformIcon
-                                        platformId={item.platformId}
-                                        size={20}
-                                        className="h-5 w-5"
-                                      />
-                                    )}
-                                  </div>
-                                  <div className="min-w-0 flex-1">
-                                    <div className="flex items-center gap-2">
-                                      <div className="truncate text-sm font-medium text-foreground">
-                                        {item.name}
-                                      </div>
-                                    </div>
-                                    <div className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">
-                                      {item.type === "project"
-                                        ? item.path
-                                        : item.file.name}
-                                    </div>
-                                  </div>
-                                </div>
-                              </button>
-
-                              {item.canRemove && item.projectId ? (
-                                <div className="mt-3 flex justify-end">
-                                  <button
-                                    type="button"
-                                    onClick={() =>
-                                      void handleRemoveRuleProject(
-                                        item.projectId!,
-                                      )
-                                    }
-                                    className="inline-flex items-center gap-1 rounded-lg border border-border px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-                                  >
-                                    <Trash2Icon className="h-3.5 w-3.5" />
-                                    {t("common.remove", "Remove")}
-                                  </button>
-                                </div>
-                              ) : null}
-                            </div>
-                          ))}
-
-                          {section.id === "project" && canAddRuleProject ? (
-                            <button
-                              type="button"
-                              onClick={() => void handleAddRuleProject()}
-                              className="w-full rounded-2xl border border-dashed border-border px-3 py-4 text-left transition-colors hover:bg-muted/40"
-                            >
-                              <div className="flex items-center gap-3">
-                                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-muted text-muted-foreground">
-                                  <FolderPlusIcon className="h-5 w-5" />
-                                </div>
-                                <div className="min-w-0 flex-1">
-                                  <div className="text-sm font-medium text-foreground">
-                                    {t(
-                                      "rules.addProjectRuleDirectory",
-                                      "Add Project Directory",
-                                    )}
-                                  </div>
-                                  <div className="mt-1 text-xs leading-5 text-muted-foreground">
-                                    {t(
-                                      "rules.addProjectRuleDirectoryHint",
-                                      "Pick a folder and PromptHub will manage its canonical AGENTS.md rule file here.",
-                                    )}
-                                  </div>
-                                </div>
-                              </div>
-                            </button>
-                          ) : null}
-                        </div>
-                      ) : section.id === "project" && canAddRuleProject ? (
-                        <button
-                          type="button"
-                          onClick={() => void handleAddRuleProject()}
-                          className="w-full rounded-2xl border border-dashed border-border px-3 py-3 text-left transition-colors hover:bg-muted/40"
-                        >
-                          <div className="flex items-center gap-3">
-                            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-muted text-muted-foreground">
-                              <PlusIcon className="h-4 w-4" />
-                            </div>
-                            <div className="min-w-0 flex-1 text-sm font-medium text-foreground">
-                              {t(
-                                "rules.addProjectRuleDirectory",
-                                "Add Project Directory",
-                              )}
-                            </div>
-                          </div>
-                        </button>
-                      ) : null}
+                      ))}
                     </div>
-                  ))}
-                </div>
+                  </div>
+                ) : (
+                  <div className="flex-1" />
+                )}
               </div>
             </>
+          ) : activeModule === "plugin" ? (
+            <>
+              <div className="flex-shrink-0 flex flex-col px-3 py-2">
+                <div className="space-y-1 shrink-0">
+                  <NavItem
+                    icon={<PackageIcon className="w-5 h-5" />}
+                    label={t("plugin.myPlugins", "My Plugins")}
+                    count={pluginLibrary?.plugins.length ?? 0}
+                    active={pluginSelectedTab === "library"}
+                    collapsed={isCollapsed}
+                    onClick={() => {
+                      setPluginSelectedTab("library");
+                      if (currentPage !== "home") onNavigate("home");
+                    }}
+                  />
+                  <NavItem
+                    icon={<BotIcon className="w-5 h-5" />}
+                    label={t("plugin.pluginTargets", "Plugin Targets")}
+                    count={pluginTargetMatrix.length}
+                    active={pluginSelectedTab === "targets"}
+                    collapsed={isCollapsed}
+                    onClick={() => {
+                      setPluginSelectedTab("targets");
+                      if (currentPage !== "home") onNavigate("home");
+                    }}
+                  />
+                  <div className="h-px app-wallpaper-panel-strong-border/50 my-2" />
+                  <NavItem
+                    icon={<StoreIcon className="w-5 h-5" />}
+                    label={t("plugin.pluginStore", "Plugin Store")}
+                    active={pluginSelectedTab === "market"}
+                    collapsed={isCollapsed}
+                    onClick={handlePluginStoreNavClick}
+                  />
+                </div>
+              </div>
+
+              <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
+                {isPluginStoreGroupExpanded && !isCollapsed ? (
+                  <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden scrollbar-hide px-3 pb-3">
+                    <div className="ml-4 mt-1 pl-3 pr-1 border-l border-sidebar-border/50 space-y-1">
+                      {pluginMarketSources.map((source) => (
+                        <button
+                          key={source.id}
+                          type="button"
+                          onClick={() => openPluginStoreSource(source.id)}
+                          className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors ${
+                            pluginSelectedTab === "market" &&
+                            pluginSelectedMarketSourceId === source.id
+                              ? "bg-sidebar-accent text-sidebar-foreground"
+                              : "text-sidebar-foreground/60 hover:bg-sidebar-accent/40 hover:text-sidebar-foreground"
+                          }`}
+                        >
+                          <StoreIcon className="w-4 h-4" aria-hidden="true" />
+                          <span className="flex-1 text-left truncate">
+                            {source.id === "openai-curated"
+                              ? t(
+                                  "plugin.sources.codexOfficial",
+                                  "Codex Plugin Store",
+                                )
+                              : source.id === "prompthub-official"
+                                ? t(
+                                    "plugin.sources.promptHubOfficial",
+                                    "Official Store",
+                                  )
+                                : source.displayName}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex-1" />
+                )}
+              </div>
+            </>
+          ) : (
+            <Suspense
+              fallback={
+                <div className="flex flex-1 items-center justify-center px-3 py-4">
+                  <Spinner
+                    size="sm"
+                    tone="muted"
+                    label={t("rules.loadingSidebar", "Loading rules sidebar")}
+                  />
+                </div>
+              }
+            >
+              <RulesSidebarPanel
+                currentPage={currentPage}
+                onNavigate={onNavigate}
+              />
+            </Suspense>
           )}
         </div>
       ) : null}
@@ -1846,8 +2157,7 @@ export function Sidebar({
           onSuccess={() => {
             if (passwordFolder) {
               unlockFolder(passwordFolder.id);
-              selectFolder(passwordFolder.id);
-              if (currentPage !== "home") onNavigate("home");
+              openPromptFolder(passwordFolder.id);
             }
             setIsPasswordModalOpen(false);
             setPasswordFolder(null);

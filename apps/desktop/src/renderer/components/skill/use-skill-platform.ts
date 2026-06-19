@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import type {
   Skill,
   SkillInstallMode,
+  SkillPlatformInstallStatusMap,
   SkillPlatformInstallResult,
 } from "@prompthub/shared/types";
 import {
@@ -111,6 +112,8 @@ export function useSkillPlatform(
   const [installStatus, setInstallStatus] = useState<Record<string, boolean>>(
     {},
   );
+  const [installDetails, setInstallDetails] =
+    useState<SkillPlatformInstallStatusMap>({});
   const [selectedPlatforms, setSelectedPlatforms] = useState<Set<string>>(
     new Set(),
   );
@@ -138,13 +141,31 @@ export function useSkillPlatform(
   const refreshInstallStatus = useCallback(async () => {
     if (!skill || !runtimeCapabilities.skillPlatformIntegration) {
       setInstallStatus({});
+      setInstallDetails({});
       setSelectedPlatforms(new Set());
       return;
     }
-    const status = await window.api.skill.getMdInstallStatus(skill.id);
+    const details =
+      typeof window.api.skill.getMdInstallStatusDetails === "function"
+        ? await window.api.skill.getMdInstallStatusDetails(skill.id)
+        : Object.fromEntries(
+            Object.entries(await window.api.skill.getMdInstallStatus(skill.id)).map(
+              ([platformId, installed]) => [
+                platformId,
+                { installed: Boolean(installed) },
+              ],
+            ),
+          );
+    const status = Object.fromEntries(
+      Object.entries(details).map(([platformId, installStatus]) => [
+        platformId,
+        installStatus.installed,
+      ]),
+    );
+    setInstallDetails(details);
     setInstallStatus(status);
     setSelectedPlatforms(new Set());
-    await loadDeployedStatus();
+    await loadDeployedStatus({ force: true });
   }, [loadDeployedStatus, runtimeCapabilities.skillPlatformIntegration, skill]);
 
   useEffect(() => {
@@ -280,6 +301,7 @@ export function useSkillPlatform(
   return {
     availablePlatforms,
     installProgress,
+    installDetails,
     installStatus,
     isBatchInstalling,
     refreshInstallStatus,

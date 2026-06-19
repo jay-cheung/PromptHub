@@ -4,6 +4,7 @@ import React, {
   useMemo,
   lazy,
   Suspense,
+  useId,
   useState,
 } from "react";
 import { useTranslation } from "react-i18next";
@@ -13,9 +14,9 @@ import {
   TrashIcon,
   StarIcon,
   SendIcon,
+  Clock3Icon,
   LayoutGridIcon,
   ListIcon,
-  FolderInputIcon,
   CheckSquareIcon,
   SquareIcon,
   XIcon,
@@ -24,11 +25,14 @@ import {
   ChevronLeftIcon,
   ChevronRightIcon,
   EyeIcon,
-  DownloadIcon,
 } from "lucide-react";
 import { SkillGalleryCard } from "./SkillGalleryCard";
 import { SkillRenderBoundary } from "./SkillRenderBoundary";
-import { useSkillStore } from "../../stores/skill.store";
+import {
+  useSkillStore,
+  type SkillGalleryColumnMode,
+  type SkillFilterType,
+} from "../../stores/skill.store";
 import {
   DEFAULT_SKILL_LIST_PAGE_SIZE,
   SKILL_LIST_PAGE_SIZE_OPTIONS,
@@ -37,16 +41,101 @@ import {
 import { SkillQuickInstall } from "./SkillQuickInstall";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { ContextMenu, type ContextMenuItem } from "../ui/ContextMenu";
+import { Select, type SelectOption } from "../ui/Select";
+import { Spinner } from "../ui/Spinner";
 import { useToast } from "../ui/Toast";
-import type { Skill, ScannedSkill } from "@prompthub/shared/types";
+import type {
+  Skill,
+  ScannedSkill,
+  SkillPlatformInstallStatusMap,
+} from "@prompthub/shared/types";
+import type { SkillPlatform } from "@prompthub/shared/constants/platforms";
 import { updateSkillTags, type SkillBatchTagMode } from "./batch-utils";
 import { filterVisibleSkills } from "../../services/skill-filter";
+import { buildMySkillSourceBadges } from "../../services/skill-source-badges";
+import { getRemoteStoreSkills } from "../../services/remote-store-entry";
 import { getRuntimeCapabilities } from "../../runtime";
 import { useSkillStoreRemoteSync } from "./store-remote-sync";
-import { deriveSkillScanPathsFromCustomAgents } from "../../services/agent-root-paths";
+import { filterDetectedPlatforms } from "../../services/platform-visibility";
 
 const MAX_STAGGERED_CARDS = 10;
 const CARD_STAGGER_MS = 50;
+const SKILL_GALLERY_AUTO_MIN_WIDTH_PX = 280;
+const SKILL_GALLERY_MANUAL_MIN_WIDTH_PX = 240;
+const SKILL_GALLERY_COLUMNS: SkillGalleryColumnMode[] = [
+  "auto",
+  "2",
+  "3",
+  "4",
+  "5",
+  "6",
+  "7",
+  "8",
+];
+const LOCAL_SKILL_SCAN_TIMEOUT_MS = 30_000;
+const ALL_SKILL_SOURCE_FILTER = "all";
+const SKILL_VIEW_TRANSITION_CLASS =
+  "h-full min-h-0 animate-in fade-in slide-in-from-right-3 duration-smooth";
+
+interface SkillViewTransitionProps extends React.HTMLAttributes<HTMLDivElement> {
+  viewKey: string;
+}
+
+function SkillViewTransition({
+  viewKey,
+  className = "",
+  children,
+  ...props
+}: SkillViewTransitionProps) {
+  return (
+    <div
+      key={viewKey}
+      data-testid="skill-view-transition"
+      data-skill-view={viewKey}
+      className={`${SKILL_VIEW_TRANSITION_CLASS} ${className}`}
+      {...props}
+    >
+      {children}
+    </div>
+  );
+}
+
+function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  createTimeoutError: () => Error,
+): Promise<T> {
+  let timeoutId: number | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timeoutId = window.setTimeout(() => {
+      reject(createTimeoutError());
+    }, timeoutMs);
+  });
+
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timeoutId !== undefined) {
+      window.clearTimeout(timeoutId);
+    }
+  });
+}
+
+function getSkillGalleryGridStyle(
+  columns: SkillGalleryColumnMode,
+): React.CSSProperties {
+  if (columns === "auto") {
+    return {
+      gridTemplateColumns: `repeat(auto-fill, minmax(min(100%, ${SKILL_GALLERY_AUTO_MIN_WIDTH_PX}px), 1fr))`,
+    };
+  }
+
+  const columnCount = Number(columns);
+  const totalGapRem = columnCount - 1;
+
+  return {
+    gridTemplateColumns: `repeat(auto-fill, minmax(min(100%, max(${SKILL_GALLERY_MANUAL_MIN_WIDTH_PX}px, calc((100% - ${totalGapRem}rem) / ${columnCount}))), 1fr))`,
+  };
+}
+
 // Lazy load list view for better performance
 // 懒加载列表视图以提升性能
 const SkillListView = lazy(() =>
@@ -63,6 +152,9 @@ const SkillStore = lazy(() =>
 const SkillProjectsView = lazy(() =>
   import("./SkillProjectsView").then((m) => ({ default: m.SkillProjectsView })),
 );
+const SkillAgentsView = lazy(() =>
+  import("./SkillAgentsView").then((m) => ({ default: m.SkillAgentsView })),
+);
 const SkillScanPreview = lazy(() =>
   import("./SkillScanPreview").then((m) => ({ default: m.SkillScanPreview })),
 );
@@ -76,6 +168,18 @@ const SkillBatchTagDialog = lazy(() =>
     default: m.SkillBatchTagDialog,
   })),
 );
+
+interface DeleteDistributionSummary {
+  hasDistribution: boolean;
+  hasCopy: boolean;
+  hasSymlink: boolean;
+}
+
+const EMPTY_DELETE_DISTRIBUTION_SUMMARY: DeleteDistributionSummary = {
+  hasDistribution: false,
+  hasCopy: false,
+  hasSymlink: false,
+};
 
 function normalizeDroppedSkillPath(filePath: string): string {
   const normalizedPath = filePath.replace(/\\/g, "/").trim();
@@ -102,55 +206,227 @@ function hasFileItems(dataTransfer: DataTransfer): boolean {
   return Array.from(dataTransfer.items).some((item) => item.kind === "file");
 }
 
+function summarizeInstallDetails(
+  details: SkillPlatformInstallStatusMap,
+): DeleteDistributionSummary {
+  const installed = Object.values(details).filter((status) => status.installed);
+  return {
+    hasDistribution: installed.length > 0,
+    hasCopy: installed.some((status) => status.mode === "copy" || !status.mode),
+    hasSymlink: installed.some((status) => status.mode === "symlink"),
+  };
+}
+
+function normalizePlatformStatusMap(value: unknown): Record<string, boolean> {
+  if (!value || typeof value !== "object") {
+    return {};
+  }
+
+  return Object.fromEntries(
+    Object.entries(value).filter((entry): entry is [string, boolean] => {
+      const [, installed] = entry;
+      return typeof installed === "boolean";
+    }),
+  );
+}
+
+function mergeDeleteDistributionSummaries(
+  summaries: DeleteDistributionSummary[],
+): DeleteDistributionSummary {
+  return summaries.reduce(
+    (merged, summary) => ({
+      hasDistribution: merged.hasDistribution || summary.hasDistribution,
+      hasCopy: merged.hasCopy || summary.hasCopy,
+      hasSymlink: merged.hasSymlink || summary.hasSymlink,
+    }),
+    EMPTY_DELETE_DISTRIBUTION_SUMMARY,
+  );
+}
+
+function getPrimarySkillSourceBadge(
+  skill: Skill,
+  t: ReturnType<typeof useTranslation>["t"],
+) {
+  return buildMySkillSourceBadges(skill, t).find(
+    (badge) => !badge.key.startsWith("source-branch-"),
+  );
+}
+
 export function SkillManager() {
   const { t } = useTranslation();
   const { showToast } = useToast();
+  const deleteCopyInstallationsInputId = useId();
+  const deleteCopyInstallationsLabelId = useId();
+  const deleteCopyInstallationsHelpId = useId();
   const skills = useSkillStore((state) => state.skills);
   const loadSkills = useSkillStore((state) => state.loadSkills);
   const deleteSkill = useSkillStore((state) => state.deleteSkill);
   const toggleFavorite = useSkillStore((state) => state.toggleFavorite);
   const updateSkill = useSkillStore((state) => state.updateSkill);
-  const isLoading = useSkillStore((state) => state.isLoading);
   const selectedSkillId = useSkillStore((state) => state.selectedSkillId);
   const selectSkill = useSkillStore((state) => state.selectSkill);
   const filterType = useSkillStore((state) => state.filterType);
   const searchQuery = useSkillStore((state) => state.searchQuery);
   const viewMode = useSkillStore((state) => state.viewMode);
+  const galleryColumns = useSkillStore((state) => state.galleryColumns);
   const setViewMode = useSkillStore((state) => state.setViewMode);
+  const setGalleryColumns = useSkillStore((state) => state.setGalleryColumns);
   const storeView = useSkillStore((state) => state.storeView);
   const setStoreView = useSkillStore((state) => state.setStoreView);
   const setFilterType = useSkillStore((state) => state.setFilterType);
   const deployedSkillNames = useSkillStore((state) => state.deployedSkillNames);
   const loadDeployedStatus = useSkillStore((state) => state.loadDeployedStatus);
   const skillFilterTags = useSkillStore((state) => state.filterTags);
-  const customAgents = useSettingsStore((state) => state.customAgents);
   const storedSkillListPageSize = useSettingsStore(
     (state) => state.skillListPageSize,
   );
   const setSkillListPageSize = useSettingsStore(
     (state) => state.setSkillListPageSize,
   );
+  const disabledPlatformIds =
+    useSettingsStore((state) => state.disabledPlatformIds) ?? [];
   const pageSize = SKILL_LIST_PAGE_SIZE_OPTIONS.includes(
     storedSkillListPageSize as (typeof SKILL_LIST_PAGE_SIZE_OPTIONS)[number],
   )
     ? storedSkillListPageSize
     : DEFAULT_SKILL_LIST_PAGE_SIZE;
   const runtimeCapabilities = getRuntimeCapabilities();
+  const [supportedPlatforms, setSupportedPlatforms] = useState<SkillPlatform[]>(
+    [],
+  );
+  const [detectedPlatforms, setDetectedPlatforms] = useState<string[]>([]);
+  const [skillPlatformStatuses, setSkillPlatformStatuses] = useState<
+    Record<string, Record<string, boolean>>
+  >({});
+  const galleryColumnOptions = useMemo<SelectOption[]>(
+    () =>
+      SKILL_GALLERY_COLUMNS.map((columns) => ({
+        value: columns,
+        label:
+          columns === "auto"
+            ? t("skill.galleryColumnsAuto", "Auto")
+            : t("skill.galleryColumnsCount", {
+                count: Number(columns),
+                defaultValue: "{{count}} columns",
+              }),
+      })),
+    [t],
+  );
+  const skillGalleryGridStyle = useMemo(
+    () => getSkillGalleryGridStyle(galleryColumns ?? "auto"),
+    [galleryColumns],
+  );
+  const availableSkillPlatforms = useMemo(
+    () =>
+      filterDetectedPlatforms(
+        supportedPlatforms,
+        detectedPlatforms,
+        disabledPlatformIds,
+      ),
+    [detectedPlatforms, disabledPlatformIds, supportedPlatforms],
+  );
+  const distributedPlatformsBySkillId = useMemo(() => {
+    const next = new Map<string, Array<Pick<SkillPlatform, "id" | "name">>>();
+
+    for (const skill of skills) {
+      const status = skillPlatformStatuses[skill.id] ?? {};
+      next.set(
+        skill.id,
+        availableSkillPlatforms
+          .filter((platform) => status[platform.id])
+          .map((platform) => ({ id: platform.id, name: platform.name })),
+      );
+    }
+
+    return next;
+  }, [availableSkillPlatforms, skillPlatformStatuses, skills]);
   const webSkillLibraryMode =
     !runtimeCapabilities.skillDistribution && !runtimeCapabilities.skillStore;
-  const effectiveStoreView = webSkillLibraryMode ? "my-skills" : storeView;
+  const legacyDistributionView = storeView === "distribution";
+  const effectiveStoreView =
+    webSkillLibraryMode || legacyDistributionView ? "my-skills" : storeView;
   const effectiveFilterType =
     webSkillLibraryMode &&
-    (filterType === "installed" ||
+    (legacyDistributionView ||
+      filterType === "installed" ||
       filterType === "deployed" ||
       filterType === "pending")
       ? "all"
-      : filterType;
-  const isDistributionView = effectiveStoreView === "distribution";
+      : legacyDistributionView
+        ? "deployed"
+        : filterType;
+  const isDistributionView = false;
+  const skillDistributionCounts = useMemo(() => {
+    let deployed = 0;
+    let favorite = 0;
+
+    for (const skill of skills) {
+      if (skill.is_favorite) {
+        favorite += 1;
+      }
+      if (
+        deployedSkillNames.has(skill.id) ||
+        deployedSkillNames.has(skill.name)
+      ) {
+        deployed += 1;
+      }
+    }
+
+    return {
+      all: skills.length,
+      deployed,
+      favorite,
+      pending: Math.max(skills.length - deployed, 0),
+    };
+  }, [deployedSkillNames, skills]);
+  const mySkillFilterOptions = useMemo(
+    () =>
+      [
+        {
+          icon: <CuboidIcon className="h-3.5 w-3.5" />,
+          label: t("skill.allSkills", "All Skills"),
+          count: skillDistributionCounts.all,
+          value: "all",
+        },
+        {
+          icon: <StarIcon className="h-3.5 w-3.5" />,
+          label: t("skill.favorites", "Favorites"),
+          count: skillDistributionCounts.favorite,
+          value: "favorites",
+        },
+        {
+          icon: <SendIcon className="h-3.5 w-3.5" />,
+          label: t("skill.deployed", "Distributed"),
+          count: skillDistributionCounts.deployed,
+          value: "deployed",
+        },
+        {
+          icon: <Clock3Icon className="h-3.5 w-3.5" />,
+          label: t("skill.pendingDeployment", "Pending"),
+          count: skillDistributionCounts.pending,
+          value: "pending",
+        },
+      ] satisfies Array<{
+        icon: React.ReactNode;
+        label: string;
+        count: number;
+        value: SkillFilterType;
+      }>,
+    [skillDistributionCounts, t],
+  );
+  const handleMySkillFilterChange = (nextFilter: SkillFilterType) => {
+    setStoreView("my-skills");
+    setFilterType(nextFilter);
+    selectSkill(null);
+  };
+
+  const [sourceFilterKey, setSourceFilterKey] = useState(
+    ALL_SKILL_SOURCE_FILTER,
+  );
 
   // Get filtered skills - filter directly in useMemo instead of using store function
   // 直接在 useMemo 中过滤，而不是使用 store 函数（避免函数引用作为依赖）
-  const filteredSkills = useMemo(() => {
+  const baseFilteredSkills = useMemo(() => {
     return filterVisibleSkills({
       deployedSkillNames,
       filterTags: skillFilterTags,
@@ -168,6 +444,73 @@ export function SkillManager() {
     skills,
   ]);
 
+  const sourceFilterEntries = useMemo(() => {
+    const entries = new Map<string, { label: string; count: number }>();
+
+    for (const skill of baseFilteredSkills) {
+      const badge = getPrimarySkillSourceBadge(skill, t);
+      if (!badge) {
+        continue;
+      }
+
+      const current = entries.get(badge.key);
+      entries.set(badge.key, {
+        label: String(badge.label),
+        count: (current?.count ?? 0) + 1,
+      });
+    }
+
+    return Array.from(entries.entries())
+      .map(([value, entry]) => ({ value, ...entry }))
+      .sort((left, right) => left.label.localeCompare(right.label));
+  }, [baseFilteredSkills, t]);
+
+  const hasActiveSourceFilter = sourceFilterKey !== ALL_SKILL_SOURCE_FILTER;
+  const activeSourceFilterKey = sourceFilterEntries.some(
+    (entry) => entry.value === sourceFilterKey,
+  )
+    ? sourceFilterKey
+    : ALL_SKILL_SOURCE_FILTER;
+
+  const sourceFilterOptions = useMemo<SelectOption[]>(
+    () => [
+      {
+        value: ALL_SKILL_SOURCE_FILTER,
+        label: (
+          <span className="flex w-full items-center justify-between gap-2">
+            <span>{t("skill.allSources", "All Sources")}</span>
+            <span className="text-xs text-muted-foreground">
+              {baseFilteredSkills.length}
+            </span>
+          </span>
+        ),
+        labelText: t("skill.allSources", "All Sources"),
+      },
+      ...sourceFilterEntries.map((entry) => ({
+        value: entry.value,
+        label: (
+          <span className="flex w-full items-center justify-between gap-2">
+            <span className="truncate">{entry.label}</span>
+            <span className="text-xs text-muted-foreground">{entry.count}</span>
+          </span>
+        ),
+        labelText: entry.label,
+      })),
+    ],
+    [baseFilteredSkills.length, sourceFilterEntries, t],
+  );
+
+  const filteredSkills = useMemo(() => {
+    if (activeSourceFilterKey === ALL_SKILL_SOURCE_FILTER) {
+      return baseFilteredSkills;
+    }
+
+    return baseFilteredSkills.filter(
+      (skill) =>
+        getPrimarySkillSourceBadge(skill, t)?.key === activeSourceFilterKey,
+    );
+  }, [activeSourceFilterKey, baseFilteredSkills, t]);
+
   // Quick install state
   // 快速安装状态
   const [quickInstallSkill, setQuickInstallSkill] = useState<Skill | null>(
@@ -180,7 +523,8 @@ export function SkillManager() {
   const [showBatchDeployDialog, setShowBatchDeployDialog] = useState(false);
   const [showBatchTagDialog, setShowBatchTagDialog] = useState(false);
   const [scannedSkills, setScannedSkills] = useState<ScannedSkill[]>([]);
-  const [isScanning, setIsScanning] = useState(false);
+  const [, setIsScanning] = useState(false);
+  const [isRefreshingLibrary, setIsRefreshingLibrary] = useState(false);
   const [isSelectionMode, setIsSelectionMode] = useState(false);
   const [isDropTargetActive, setIsDropTargetActive] = useState(false);
   const [currentPage, setCurrentPage] = useState(1);
@@ -203,7 +547,7 @@ export function SkillManager() {
   const skillsWithStoreUpdates = useMemo(() => {
     const registrySkillBySlug = new Map(
       Object.values(remoteStoreEntries)
-        .flatMap((entry) => entry.skills)
+        .flatMap((entry) => getRemoteStoreSkills(entry))
         .map((skill) => [skill.slug, skill]),
     );
 
@@ -238,24 +582,15 @@ export function SkillManager() {
     isOpen: boolean;
     skillIds: string[];
     skillNames: string[];
-  }>({ isOpen: false, skillIds: [], skillNames: [] });
-
-  const handleScanLocal = async (customPaths?: string[]) => {
-    if (!runtimeCapabilities.skillLocalScan) {
-      return;
-    }
-
-    setIsScanning(true);
-    try {
-      const result = await scanLocalPreview(customPaths);
-      setScannedSkills(result);
-      setShowScanPreview(true);
-    } catch (err) {
-      console.error("Failed to scan local skills:", err);
-    } finally {
-      setIsScanning(false);
-    }
-  };
+    removeCopyInstallations: boolean;
+    distributionSummary: DeleteDistributionSummary;
+  }>({
+    isOpen: false,
+    skillIds: [],
+    skillNames: [],
+    removeCopyInstallations: false,
+    distributionSummary: EMPTY_DELETE_DISTRIBUTION_SUMMARY,
+  });
 
   const handleDropImport = useCallback(
     async (files: FileList | File[]) => {
@@ -278,9 +613,26 @@ export function SkillManager() {
 
       setIsScanning(true);
       try {
-        const result = await scanLocalPreview(uniquePaths);
+        const result = await withTimeout(
+          scanLocalPreview(uniquePaths),
+          LOCAL_SKILL_SCAN_TIMEOUT_MS,
+          () =>
+            new Error(
+              t(
+                "skill.scanLocalTimeout",
+                "Local skill scan timed out. Check whether an agent folder is inaccessible, then try again.",
+              ),
+            ),
+        );
         setScannedSkills(result);
         setShowScanPreview(true);
+        showToast(
+          t("skill.scanLocalComplete", {
+            count: result.length,
+            defaultValue: `Scanned ${result.length} local skill(s)`,
+          }),
+          "success",
+        );
 
         if (result.length === 0) {
           showToast(
@@ -308,11 +660,40 @@ export function SkillManager() {
   // 传给预览弹窗的重新扫描回调
   const handleRescan = async (customPaths: string[]) => {
     if (!runtimeCapabilities.skillLocalScan) {
-      return;
+      return false;
     }
 
-    const result = await scanLocalPreview(customPaths);
-    setScannedSkills(result);
+    try {
+      const result = await withTimeout(
+        scanLocalPreview(customPaths),
+        LOCAL_SKILL_SCAN_TIMEOUT_MS,
+        () =>
+          new Error(
+            t(
+              "skill.scanLocalTimeout",
+              "Local skill scan timed out. Check whether an agent folder is inaccessible, then try again.",
+            ),
+          ),
+      );
+      setScannedSkills(result);
+      showToast(
+        t("skill.scanLocalComplete", {
+          count: result.length,
+          defaultValue: `Scanned ${result.length} local skill(s)`,
+        }),
+        "success",
+      );
+      return true;
+    } catch (err) {
+      console.error("Failed to rescan local skills:", err);
+      showToast(
+        err instanceof Error
+          ? err.message
+          : t("skill.scanLocalFailed", "Failed to scan local skills"),
+        "error",
+      );
+      return false;
+    }
   };
 
   const handleImportScanned = async (
@@ -322,7 +703,7 @@ export function SkillManager() {
     const result = await importScannedSkills(skillsToImport, userTagsByPath);
     // Refresh deployed status after import
     if (runtimeCapabilities.skillDistribution) {
-      await loadDeployedStatus();
+      await loadDeployedStatus({ force: true });
     }
     return result.importedCount;
   };
@@ -343,25 +724,6 @@ export function SkillManager() {
     [selectedSkillIds, visibleSkills],
   );
 
-  // Load skills on mount, then defer deployed status to idle time
-  useEffect(() => {
-    if (!webSkillLibraryMode) {
-      return;
-    }
-
-    if (storeView !== "my-skills") {
-      setStoreView("my-skills");
-    }
-
-    if (
-      filterType === "installed" ||
-      filterType === "deployed" ||
-      filterType === "pending"
-    ) {
-      setFilterType("all");
-    }
-  }, [filterType, setFilterType, setStoreView, storeView, webSkillLibraryMode]);
-
   useEffect(() => {
     let disposed = false;
     let idleId: number | undefined;
@@ -374,7 +736,7 @@ export function SkillManager() {
       cancelIdleCallback?: (handle: number) => void;
     };
 
-    void loadSkills().then(() => {
+    void loadSkills({ preferCache: true }).then(() => {
       if (disposed) return;
 
       if (!runtimeCapabilities.skillDistribution) {
@@ -409,14 +771,110 @@ export function SkillManager() {
   }, [loadSkills, loadDeployedStatus, runtimeCapabilities.skillDistribution]);
 
   useEffect(() => {
+    if (!runtimeCapabilities.skillPlatformIntegration) {
+      setSupportedPlatforms([]);
+      setDetectedPlatforms([]);
+      return;
+    }
+
+    let disposed = false;
+    void Promise.all([
+      window.api.skill.getSupportedPlatforms(),
+      window.api.skill.detectPlatforms(),
+    ])
+      .then(([platforms, detected]) => {
+        if (disposed) {
+          return;
+        }
+        setSupportedPlatforms((current) =>
+          platforms.length === 0 && current.length === 0 ? current : platforms,
+        );
+        setDetectedPlatforms((current) =>
+          detected.length === 0 && current.length === 0 ? current : detected,
+        );
+      })
+      .catch((error) => {
+        if (disposed) {
+          return;
+        }
+        console.error("Failed to load skill platforms:", error);
+        setSupportedPlatforms([]);
+        setDetectedPlatforms([]);
+      });
+
+    return () => {
+      disposed = true;
+    };
+  }, [runtimeCapabilities.skillPlatformIntegration]);
+
+  useEffect(() => {
+    if (
+      !runtimeCapabilities.skillPlatformIntegration ||
+      skills.length === 0 ||
+      availableSkillPlatforms.length === 0
+    ) {
+      setSkillPlatformStatuses((current) =>
+        Object.keys(current).length === 0 ? current : {},
+      );
+      return;
+    }
+
+    let disposed = false;
+    void window.api.skill
+      .getMdInstallStatusBatch(
+        Array.from(new Set(skills.map((skill) => skill.id))),
+      )
+      .then((statusBySkillId) => {
+        if (disposed) {
+          return;
+        }
+        setSkillPlatformStatuses(
+          Object.fromEntries(
+            Object.entries(statusBySkillId as Record<string, unknown>).map(
+              ([skillId, status]) => [
+                skillId,
+                normalizePlatformStatusMap(status),
+              ],
+            ),
+          ),
+        );
+      })
+      .catch((error) => {
+        if (disposed) {
+          return;
+        }
+        console.error("Failed to load skill install status:", error);
+        setSkillPlatformStatuses({});
+      });
+
+    return () => {
+      disposed = true;
+    };
+  }, [
+    availableSkillPlatforms.length,
+    runtimeCapabilities.skillPlatformIntegration,
+    skills,
+  ]);
+
+  useEffect(() => {
     setCurrentPage(1);
   }, [
     effectiveFilterType,
     effectiveStoreView,
     pageSize,
     searchQuery,
+    sourceFilterKey,
     skillFilterTags,
   ]);
+
+  useEffect(() => {
+    if (
+      sourceFilterKey !== ALL_SKILL_SOURCE_FILTER &&
+      activeSourceFilterKey === ALL_SKILL_SOURCE_FILTER
+    ) {
+      setSourceFilterKey(ALL_SKILL_SOURCE_FILTER);
+    }
+  }, [activeSourceFilterKey, sourceFilterKey]);
 
   useEffect(() => {
     setCurrentPage((page) => Math.min(page, totalPages));
@@ -433,29 +891,49 @@ export function SkillManager() {
   // 商店视图：显示技能商店页面
   if (runtimeCapabilities.skillStore && effectiveStoreView === "store") {
     return (
-      <Suspense
-        fallback={
-          <div className="flex h-full items-center justify-center">
-            <div className="w-6 h-6 border-2 border-primary border-t-transparent rounded-full animate-spin" />
-          </div>
-        }
-      >
-        <SkillStore />
-      </Suspense>
+      <SkillViewTransition viewKey="store">
+        <Suspense
+          fallback={
+            <div className="flex h-full items-center justify-center">
+              <Spinner />
+            </div>
+          }
+        >
+          <SkillStore />
+        </Suspense>
+      </SkillViewTransition>
     );
   }
 
   if (runtimeCapabilities.skillLocalScan && effectiveStoreView === "projects") {
     return (
-      <Suspense
-        fallback={
-          <div className="flex h-full items-center justify-center">
-            <div className="w-6 h-6 border-2 border-primary border-t-transparent rounded-full animate-spin" />
-          </div>
-        }
-      >
-        <SkillProjectsView />
-      </Suspense>
+      <SkillViewTransition viewKey="projects">
+        <Suspense
+          fallback={
+            <div className="flex h-full items-center justify-center">
+              <Spinner />
+            </div>
+          }
+        >
+          <SkillProjectsView />
+        </Suspense>
+      </SkillViewTransition>
+    );
+  }
+
+  if (runtimeCapabilities.skillLocalScan && effectiveStoreView === "agents") {
+    return (
+      <SkillViewTransition viewKey="agents">
+        <Suspense
+          fallback={
+            <div className="flex h-full items-center justify-center">
+              <Spinner />
+            </div>
+          }
+        >
+          <SkillAgentsView />
+        </Suspense>
+      </SkillViewTransition>
     );
   }
 
@@ -463,33 +941,35 @@ export function SkillManager() {
   // 如果选中了技能，显示全宽详情页（画廊和列表视图使用相同交互）
   if (selectedSkillId && !isSelectionMode) {
     return (
-      <Suspense
-        fallback={
-          <div className="flex h-full items-center justify-center">
-            <div className="w-6 h-6 border-2 border-primary border-t-transparent rounded-full animate-spin" />
-          </div>
-        }
-      >
-        <SkillRenderBoundary
-          resetKey={selectedSkillId}
-          title={t(
-            "skill.detailRenderError",
-            "This skill cannot be opened right now",
-          )}
-          description={t(
-            "skill.detailRenderErrorHint",
-            "This render error was contained so the page stays usable. You can go back to the list or retry loading the detail view now.",
-          )}
-          primaryActionLabel={t("common.back", "Back")}
-          onPrimaryAction={() => selectSkill(null)}
-          secondaryActionLabel={t("common.retry", "Retry")}
-          onSecondaryAction={() => {
-            void loadSkills().then(() => loadDeployedStatus());
-          }}
+      <SkillViewTransition viewKey={`detail-${selectedSkillId}`}>
+        <Suspense
+          fallback={
+            <div className="flex h-full items-center justify-center">
+              <Spinner />
+            </div>
+          }
         >
-          <SkillFullDetailPage />
-        </SkillRenderBoundary>
-      </Suspense>
+          <SkillRenderBoundary
+            resetKey={selectedSkillId}
+            title={t(
+              "skill.detailRenderError",
+              "This skill cannot be opened right now",
+            )}
+            description={t(
+              "skill.detailRenderErrorHint",
+              "This render error was contained so the page stays usable. You can go back to the list or retry loading the detail view now.",
+            )}
+            primaryActionLabel={t("common.back", "Back")}
+            onPrimaryAction={() => selectSkill(null)}
+            secondaryActionLabel={t("common.retry", "Retry")}
+            onSecondaryAction={() => {
+              void loadSkills().then(() => loadDeployedStatus({ force: true }));
+            }}
+          >
+            <SkillFullDetailPage />
+          </SkillRenderBoundary>
+        </Suspense>
+      </SkillViewTransition>
     );
   }
 
@@ -532,11 +1012,10 @@ export function SkillManager() {
 
   const handleBatchDelete = async () => {
     if (selectedSkills.length === 0) return;
-    setDeleteConfirm({
-      isOpen: true,
-      skillIds: selectedSkills.map((s) => s.id),
-      skillNames: selectedSkills.map((s) => s.name),
-    });
+    await openDeleteConfirm(
+      selectedSkills.map((s) => s.id),
+      selectedSkills.map((s) => s.name),
+    );
   };
 
   const handleBatchDeploy = () => {
@@ -588,6 +1067,52 @@ export function SkillManager() {
     setShowBatchTagDialog(true);
   };
 
+  const openDeleteConfirm = async (
+    skillIds: string[],
+    skillNames: string[],
+  ) => {
+    const fallbackSummary: DeleteDistributionSummary = {
+      hasDistribution: skillIds.some((id) => deployedSkillNames.has(id)),
+      hasCopy: skillIds.some((id) => deployedSkillNames.has(id)),
+      hasSymlink: false,
+    };
+
+    setDeleteConfirm({
+      isOpen: true,
+      skillIds,
+      skillNames,
+      removeCopyInstallations: false,
+      distributionSummary: fallbackSummary,
+    });
+
+    try {
+      const summaries = await Promise.all(
+        skillIds.map(async (skillId) =>
+          summarizeInstallDetails(
+            await window.api.skill.getMdInstallStatusDetails(skillId),
+          ),
+        ),
+      );
+      setDeleteConfirm((current) => {
+        if (
+          !current.isOpen ||
+          current.skillIds.join("\n") !== skillIds.join("\n")
+        ) {
+          return current;
+        }
+        return {
+          ...current,
+          distributionSummary: mergeDeleteDistributionSummaries(summaries),
+        };
+      });
+    } catch (error) {
+      console.warn(
+        "Failed to inspect skill distribution before delete:",
+        error,
+      );
+    }
+  };
+
   const handleBatchTagSubmit = async (tag: string, mode: SkillBatchTagMode) => {
     const results = await Promise.allSettled(
       selectedSkills.map(async (skill) => {
@@ -633,9 +1158,17 @@ export function SkillManager() {
 
   const confirmDelete = async () => {
     for (const id of deleteConfirm.skillIds) {
-      await deleteSkill(id);
+      await deleteSkill(id, {
+        removeCopyInstallations: deleteConfirm.removeCopyInstallations,
+      });
     }
-    setDeleteConfirm({ isOpen: false, skillIds: [], skillNames: [] });
+    setDeleteConfirm({
+      isOpen: false,
+      skillIds: [],
+      skillNames: [],
+      removeCopyInstallations: false,
+      distributionSummary: EMPTY_DELETE_DISTRIBUTION_SUMMARY,
+    });
     setSelectedSkillIds(new Set());
     setIsSelectionMode(false);
   };
@@ -776,7 +1309,7 @@ export function SkillManager() {
         ? [
             {
               label: t("skill.quickInstall", "Quick Install"),
-              icon: <DownloadIcon className="w-4 h-4" />,
+              icon: <SendIcon className="w-4 h-4" />,
               onClick: () => setQuickInstallSkill(skill),
             } satisfies ContextMenuItem,
           ]
@@ -785,19 +1318,15 @@ export function SkillManager() {
         label: t("common.delete", "Delete"),
         icon: <TrashIcon className="w-4 h-4" />,
         variant: "destructive",
-        onClick: () =>
-          setDeleteConfirm({
-            isOpen: true,
-            skillIds: [skill.id],
-            skillNames: [skill.name],
-          }),
+        onClick: () => void openDeleteConfirm([skill.id], [skill.name]),
       },
     ];
   })();
 
   return (
-    <div
-      className="relative flex flex-1 flex-row h-full overflow-hidden app-wallpaper-section"
+    <SkillViewTransition
+      viewKey="my-skills"
+      className="relative flex flex-1 flex-row overflow-hidden app-wallpaper-section"
       onDragEnter={(event) => {
         if (!hasFileItems(event.dataTransfer)) {
           return;
@@ -873,19 +1402,30 @@ export function SkillManager() {
               </div>
 
               <div className="flex items-center gap-2 self-start lg:self-center lg:justify-end">
-                {!isSelectionMode ? (
-                  <button
-                    onClick={toggleSelectionMode}
-                    className="inline-flex items-center gap-2 rounded-xl border border-border app-wallpaper-surface px-3 py-2 text-sm font-medium text-foreground transition-colors hover:border-primary/25 hover:bg-accent"
-                    title={t("skill.batchManage", "Batch Manage")}
-                  >
-                    <CheckSquareIcon className="w-4 h-4" />
-                    {t("skill.batchManage", "Batch Manage")}
-                  </button>
-                ) : null}
+                <button
+                  type="button"
+                  onClick={toggleSelectionMode}
+                  aria-pressed={isSelectionMode}
+                  className={`inline-flex items-center gap-2 rounded-xl border px-3 py-2 text-sm font-medium transition-colors ${
+                    isSelectionMode
+                      ? "border-primary/30 bg-primary/10 text-primary hover:bg-primary/15"
+                      : "border-border app-wallpaper-surface text-foreground hover:border-primary/25 hover:bg-accent"
+                  }`}
+                  title={t("skill.batchManage", "Batch Manage")}
+                  aria-label={t("skill.batchManage", "Batch Manage")}
+                >
+                  {isSelectionMode ? (
+                    <XIcon aria-hidden="true" className="w-4 h-4" />
+                  ) : (
+                    <CheckSquareIcon aria-hidden="true" className="w-4 h-4" />
+                  )}
+                  {t("skill.batchManage", "Batch Manage")}
+                </button>
                 <div className="flex items-center bg-muted rounded-lg p-0.5">
                   <button
+                    type="button"
                     onClick={() => setViewMode("gallery")}
+                    aria-label={t("skill.galleryView", "Gallery View")}
                     className={`p-2 rounded-md transition-colors ${
                       viewMode === "gallery"
                         ? "app-wallpaper-surface text-foreground shadow-sm"
@@ -893,10 +1433,12 @@ export function SkillManager() {
                     }`}
                     title={t("skill.galleryView", "Gallery View")}
                   >
-                    <LayoutGridIcon className="w-4 h-4" />
+                    <LayoutGridIcon aria-hidden="true" className="w-4 h-4" />
                   </button>
                   <button
+                    type="button"
                     onClick={() => setViewMode("list")}
+                    aria-label={t("skill.listView", "List View")}
                     className={`p-2 rounded-md transition-colors ${
                       viewMode === "list"
                         ? "app-wallpaper-surface text-foreground shadow-sm"
@@ -904,45 +1446,120 @@ export function SkillManager() {
                     }`}
                     title={t("skill.listView", "List View")}
                   >
-                    <ListIcon className="w-4 h-4" />
+                    <ListIcon aria-hidden="true" className="w-4 h-4" />
                   </button>
                 </div>
-                {runtimeCapabilities.skillLocalScan && (
-                  <>
-                    <div className="h-4 w-px bg-border" />
-                    <button
-                      onClick={() =>
-                        handleScanLocal(
-                          deriveSkillScanPathsFromCustomAgents(customAgents),
-                        )
-                      }
-                      disabled={isScanning}
-                      className="p-2 text-muted-foreground hover:text-foreground rounded-lg hover:bg-accent transition-colors disabled:opacity-50"
-                      title={t("skill.scanLocal", "Scan local skills")}
-                    >
-                      <FolderInputIcon
-                        className={`w-4 h-4 ${isScanning ? "animate-spin" : ""}`}
-                      />
-                    </button>
-                  </>
+                {viewMode === "gallery" && (
+                  <Select
+                    ariaLabel={t(
+                      "skill.galleryColumnsLabel",
+                      "Skill card columns",
+                    )}
+                    value={galleryColumns ?? "auto"}
+                    onChange={(value) =>
+                      setGalleryColumns(value as SkillGalleryColumnMode)
+                    }
+                    options={galleryColumnOptions}
+                    className="w-[118px]"
+                    triggerClassName="h-10 w-full rounded-lg border border-border app-wallpaper-surface px-2.5 text-sm font-medium text-foreground shadow-sm transition-colors hover:bg-accent focus:outline-none focus:ring-2 focus:ring-primary/30 flex items-center justify-between gap-2"
+                  />
                 )}
                 <div className="h-4 w-px bg-border" />
                 <button
+                  type="button"
                   onClick={async () => {
-                    await loadSkills();
-                    if (runtimeCapabilities.skillDistribution) {
-                      await loadDeployedStatus();
+                    if (isRefreshingLibrary) {
+                      return;
+                    }
+                    setIsRefreshingLibrary(true);
+                    try {
+                      await loadSkills();
+                      if (runtimeCapabilities.skillDistribution) {
+                        await loadDeployedStatus({ force: true });
+                      }
+                      showToast(
+                        t(
+                          "skill.refreshLibraryComplete",
+                          "Skill library refreshed",
+                        ),
+                        "success",
+                      );
+                    } catch (error) {
+                      console.error("Failed to refresh skill library:", error);
+                      showToast(
+                        t(
+                          "skill.refreshLibraryFailed",
+                          "Failed to refresh skill library",
+                        ),
+                        "error",
+                      );
+                    } finally {
+                      setIsRefreshingLibrary(false);
                     }
                   }}
+                  disabled={isRefreshingLibrary}
                   className="p-2 text-muted-foreground hover:text-foreground rounded-lg hover:bg-accent transition-colors"
-                  title={t("settings.refresh")}
+                  aria-label={`${t("settings.refresh")} - ${t(
+                    "skill.refreshLibraryHint",
+                    "Reload the PromptHub Skill library and platform distribution status.",
+                  )}`}
+                  title={`${t("settings.refresh")} - ${t(
+                    "skill.refreshLibraryHint",
+                    "Reload the PromptHub Skill library and platform distribution status.",
+                  )}`}
                 >
                   <RefreshCwIcon
-                    className={`w-4 h-4 ${isLoading ? "animate-spin" : ""}`}
+                    aria-hidden="true"
+                    className={`w-4 h-4 ${isRefreshingLibrary ? "animate-spin" : ""}`}
                   />
                 </button>
               </div>
             </div>
+
+            {effectiveStoreView === "my-skills" && !webSkillLibraryMode ? (
+              <div className="flex flex-wrap items-center gap-2">
+                {mySkillFilterOptions.map((option) => {
+                  const isActive = effectiveFilterType === option.value;
+                  return (
+                    <button
+                      key={option.value}
+                      type="button"
+                      onClick={() => handleMySkillFilterChange(option.value)}
+                      aria-pressed={isActive}
+                      className={`inline-flex h-9 min-w-[8rem] items-center justify-center gap-2 rounded-xl border px-4 text-sm font-medium transition-colors ${
+                        isActive
+                          ? "border-primary/30 bg-primary/10 text-primary"
+                          : "border-border app-wallpaper-surface text-muted-foreground hover:border-primary/25 hover:bg-accent hover:text-foreground"
+                      }`}
+                    >
+                      {option.icon}
+                      <span>{option.label}</span>
+                      <span
+                        className={`inline-flex h-5 min-w-5 items-center justify-center rounded-full px-1.5 text-[10px] ${
+                          isActive
+                            ? "bg-primary/15 text-primary"
+                            : "bg-muted text-muted-foreground"
+                        }`}
+                      >
+                        {option.count}
+                      </span>
+                    </button>
+                  );
+                })}
+                <Select
+                  ariaLabel={t("skill.sourceFilterLabel", "Skill source")}
+                  value={activeSourceFilterKey}
+                  onChange={(value) => setSourceFilterKey(value)}
+                  options={sourceFilterOptions}
+                  className="min-w-[13rem] flex-1 sm:flex-none"
+                  triggerClassName={`h-9 w-full rounded-xl border px-3 text-sm font-medium shadow-sm transition-colors focus:outline-none focus:ring-2 focus:ring-primary/30 flex items-center justify-between gap-2 ${
+                    hasActiveSourceFilter
+                      ? "border-primary/30 bg-primary/10 text-primary"
+                      : "border-border app-wallpaper-surface text-muted-foreground hover:border-primary/25 hover:bg-accent hover:text-foreground"
+                  }`}
+                />
+              </div>
+            ) : null}
 
             {isSelectionMode ? (
               <div className="flex flex-wrap items-center gap-2 rounded-2xl border border-primary/15 bg-primary/[0.06] p-2">
@@ -958,6 +1575,7 @@ export function SkillManager() {
                   </div>
                 </div>
                 <button
+                  type="button"
                   onClick={handleSelectAllVisible}
                   className="inline-flex items-center gap-2 rounded-xl border border-border app-wallpaper-surface px-3 py-2 text-sm font-medium text-foreground transition-colors hover:border-primary/25 hover:bg-accent"
                   title={
@@ -965,67 +1583,88 @@ export function SkillManager() {
                       ? t("common.clear", "Clear")
                       : t("common.selectAll", "Select All")
                   }
+                  aria-label={
+                    allVisibleSelected
+                      ? t("common.clear", "Clear")
+                      : t("common.selectAll", "Select All")
+                  }
                 >
                   {allVisibleSelected ? (
-                    <CheckSquareIcon className="w-4 h-4 text-primary" />
+                    <CheckSquareIcon
+                      aria-hidden="true"
+                      className="w-4 h-4 text-primary"
+                    />
                   ) : (
-                    <SquareIcon className="w-4 h-4 text-muted-foreground" />
+                    <SquareIcon
+                      aria-hidden="true"
+                      className="w-4 h-4 text-muted-foreground"
+                    />
                   )}
                   {allVisibleSelected
                     ? t("common.clear", "Clear")
                     : t("common.selectAll", "Select All")}
                 </button>
                 <button
+                  type="button"
                   onClick={handleBatchFavorite}
                   disabled={selectedSkillIds.size === 0}
                   className="inline-flex items-center gap-2 rounded-xl border border-border app-wallpaper-surface px-3 py-2 text-sm font-medium text-foreground transition-colors hover:border-primary/25 hover:bg-accent disabled:opacity-50"
+                  aria-label={
+                    selectedSkills.every((skill) => skill.is_favorite)
+                      ? t("skill.removeFavorite", "Remove Favorite")
+                      : t("skill.addFavorite", "Add Favorite")
+                  }
                   title={
                     selectedSkills.every((skill) => skill.is_favorite)
                       ? t("skill.removeFavorite", "Remove Favorite")
                       : t("skill.addFavorite", "Add Favorite")
                   }
                 >
-                  <StarIcon className="w-4 h-4 text-amber-500" />
+                  <StarIcon
+                    aria-hidden="true"
+                    className="w-4 h-4 text-amber-500"
+                  />
                   {selectedSkills.every((skill) => skill.is_favorite)
                     ? t("skill.removeFavorite", "Remove Favorite")
                     : t("skill.addFavorite", "Add Favorite")}
                 </button>
                 <button
+                  type="button"
                   onClick={handleBatchTags}
                   disabled={selectedSkillIds.size === 0}
                   className="inline-flex items-center gap-2 rounded-xl border border-border app-wallpaper-surface px-3 py-2 text-sm font-medium text-foreground transition-colors hover:border-primary/25 hover:bg-accent disabled:opacity-50"
                   title={t("skill.batchTags", "Batch Tags")}
+                  aria-label={t("skill.batchTags", "Batch Tags")}
                 >
-                  <TagsIcon className="w-4 h-4 text-primary" />
+                  <TagsIcon
+                    aria-hidden="true"
+                    className="w-4 h-4 text-primary"
+                  />
                   {t("skill.batchTags", "Batch Tags")}
                 </button>
                 {runtimeCapabilities.skillDistribution && (
                   <button
+                    type="button"
                     onClick={handleBatchDeploy}
                     disabled={selectedSkillIds.size === 0}
                     className="inline-flex items-center gap-2 rounded-xl bg-primary px-3.5 py-2 text-sm font-medium text-white transition-colors hover:bg-primary/90 disabled:opacity-50"
                     title={t("skill.batchDeploy", "Batch Deploy")}
+                    aria-label={t("skill.batchDeploy", "Batch Deploy")}
                   >
-                    <SendIcon className="w-4 h-4" />
+                    <SendIcon aria-hidden="true" className="w-4 h-4" />
                     {t("skill.batchDeploy", "Batch Deploy")}
                   </button>
                 )}
                 <button
+                  type="button"
                   onClick={handleBatchDelete}
                   disabled={selectedSkillIds.size === 0}
                   className="inline-flex items-center gap-2 rounded-xl border border-destructive/20 bg-destructive/10 px-3 py-2 text-sm font-medium text-destructive transition-colors hover:bg-destructive/15 disabled:opacity-50"
                   title={t("common.delete", "Delete")}
+                  aria-label={t("common.delete", "Delete")}
                 >
-                  <TrashIcon className="w-4 h-4" />
+                  <TrashIcon aria-hidden="true" className="w-4 h-4" />
                   {t("common.delete", "Delete")}
-                </button>
-                <button
-                  onClick={toggleSelectionMode}
-                  className="inline-flex items-center gap-2 rounded-xl border border-border app-wallpaper-surface px-3 py-2 text-sm font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-                  title={t("common.cancel", "Cancel")}
-                >
-                  <XIcon className="w-4 h-4" />
-                  {t("common.cancel", "Cancel")}
                 </button>
               </div>
             ) : null}
@@ -1046,7 +1685,7 @@ export function SkillManager() {
             <Suspense
               fallback={
                 <div className="flex items-center justify-center h-full">
-                  <div className="w-6 h-6 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+                  <Spinner />
                 </div>
               }
             >
@@ -1057,11 +1696,7 @@ export function SkillManager() {
                 onDropTag={(skill, tag) => void handleAddTagToSkill(skill, tag)}
                 onQuickInstall={setQuickInstallSkill}
                 onRequestDelete={(id, name) =>
-                  setDeleteConfirm({
-                    isOpen: true,
-                    skillIds: [id],
-                    skillNames: [name],
-                  })
+                  void openDeleteConfirm([id], [name])
                 }
                 selectionMode={isSelectionMode}
                 selectedSkillIds={selectedSkillIds}
@@ -1086,7 +1721,7 @@ export function SkillManager() {
                   </p>
                 </div>
               ) : (
-                <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5">
+                <div className="grid gap-4" style={skillGalleryGridStyle}>
                   {visibleSkills.map((skill, index) => {
                     const isSelected = selectedSkillIds.has(skill.id);
 
@@ -1094,18 +1729,19 @@ export function SkillManager() {
                       <SkillGalleryCard
                         key={skill.id}
                         animationDelayMs={
-                          Math.min(index, MAX_STAGGERED_CARDS) *
-                          CARD_STAGGER_MS
+                          Math.min(index, MAX_STAGGERED_CARDS) * CARD_STAGGER_MS
+                        }
+                        distributedPlatforms={
+                          distributedPlatformsBySkillId.get(skill.id) ?? []
                         }
                         hasStoreUpdate={skillsWithStoreUpdates.has(skill.id)}
                         isSelected={isSelected}
                         isSelectionMode={isSelectionMode}
                         onDelete={(selectedSkill) =>
-                          setDeleteConfirm({
-                            isOpen: true,
-                            skillIds: [selectedSkill.id],
-                            skillNames: [selectedSkill.name],
-                          })
+                          void openDeleteConfirm(
+                            [selectedSkill.id],
+                            [selectedSkill.name],
+                          )
                         }
                         onContextMenu={handleContextMenu}
                         onDropTag={(selectedSkill, tag) =>
@@ -1161,17 +1797,21 @@ export function SkillManager() {
 
               <div className="flex items-center gap-1">
                 <button
+                  type="button"
                   onClick={() => goToPage(currentPage - 1)}
                   disabled={currentPage === 1}
+                  aria-label={t("common.previous", "Previous")}
                   className="rounded-md p-1.5 transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50"
                   title={t("common.previous", "Previous")}
                 >
-                  <ChevronLeftIcon className="h-4 w-4" />
+                  <ChevronLeftIcon aria-hidden="true" className="h-4 w-4" />
                 </button>
                 {visiblePageNumbers.map((page) => (
                   <button
                     key={page}
+                    type="button"
                     onClick={() => goToPage(page)}
+                    aria-current={currentPage === page ? "page" : undefined}
                     className={`h-8 w-8 rounded-md text-sm transition-colors ${
                       currentPage === page
                         ? "bg-primary text-white"
@@ -1182,12 +1822,14 @@ export function SkillManager() {
                   </button>
                 ))}
                 <button
+                  type="button"
                   onClick={() => goToPage(currentPage + 1)}
                   disabled={currentPage === totalPages}
+                  aria-label={t("common.next", "Next")}
                   className="rounded-md p-1.5 transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50"
                   title={t("common.next", "Next")}
                 >
-                  <ChevronRightIcon className="h-4 w-4" />
+                  <ChevronRightIcon aria-hidden="true" className="h-4 w-4" />
                 </button>
               </div>
             </div>
@@ -1233,7 +1875,7 @@ export function SkillManager() {
             onClose={() => setShowBatchDeployDialog(false)}
             onComplete={async () => {
               if (runtimeCapabilities.skillDistribution) {
-                await loadDeployedStatus();
+                await loadDeployedStatus({ force: true });
               }
             }}
           />
@@ -1254,7 +1896,13 @@ export function SkillManager() {
       <ConfirmDialog
         isOpen={deleteConfirm.isOpen}
         onClose={() =>
-          setDeleteConfirm({ isOpen: false, skillIds: [], skillNames: [] })
+          setDeleteConfirm({
+            isOpen: false,
+            skillIds: [],
+            skillNames: [],
+            removeCopyInstallations: false,
+            distributionSummary: EMPTY_DELETE_DISTRIBUTION_SUMMARY,
+          })
         }
         onConfirm={confirmDelete}
         variant="destructive"
@@ -1273,11 +1921,65 @@ export function SkillManager() {
                   })}
             </p>
             <p className="text-xs text-muted-foreground/80">
-              {t(
-                "skill.deleteHint",
-                "This will only remove them from the PromptHub library without deleting the source directory. Any platform distributions will also be uninstalled.",
-              )}
+              {deleteConfirm.distributionSummary.hasDistribution
+                ? t(
+                    "skill.deleteDistributedHint",
+                    "This removes the skill from PromptHub. Source files are preserved. Distributed symlinks will be removed because they point back to PromptHub.",
+                  )
+                : t(
+                    "skill.deleteSourceOnlyHint",
+                    "Only removes this skill from the PromptHub library. Source files are preserved.",
+                  )}
             </p>
+            {deleteConfirm.distributionSummary.hasSymlink ? (
+              <p className="text-xs text-destructive">
+                {t(
+                  "skill.deleteSymlinkInstallationsHint",
+                  "Symlink distributions will be deleted directly.",
+                )}
+              </p>
+            ) : null}
+            {deleteConfirm.distributionSummary.hasCopy ? (
+              <label
+                htmlFor={deleteCopyInstallationsInputId}
+                className="flex items-start gap-2 rounded-xl border border-border bg-accent/30 p-3 text-xs"
+              >
+                <input
+                  id={deleteCopyInstallationsInputId}
+                  type="checkbox"
+                  aria-labelledby={deleteCopyInstallationsLabelId}
+                  aria-describedby={deleteCopyInstallationsHelpId}
+                  className="mt-0.5 h-4 w-4 accent-primary"
+                  checked={deleteConfirm.removeCopyInstallations}
+                  onChange={(event) =>
+                    setDeleteConfirm((current) => ({
+                      ...current,
+                      removeCopyInstallations: event.currentTarget.checked,
+                    }))
+                  }
+                />
+                <span>
+                  <span
+                    id={deleteCopyInstallationsLabelId}
+                    className="block font-medium text-foreground"
+                  >
+                    {t(
+                      "skill.deleteCopyInstallationsLabel",
+                      "Also delete copied distributions",
+                    )}
+                  </span>
+                  <span
+                    id={deleteCopyInstallationsHelpId}
+                    className="mt-1 block text-muted-foreground"
+                  >
+                    {t(
+                      "skill.deleteCopyInstallationsHelp",
+                      "Leave unchecked to keep copied Agent or project folders as detached copies.",
+                    )}
+                  </span>
+                </span>
+              </label>
+            ) : null}
           </div>
         }
         confirmText={t("common.delete", "Delete")}
@@ -1314,6 +2016,6 @@ export function SkillManager() {
           </div>
         </div>
       ) : null}
-    </div>
+    </SkillViewTransition>
   );
 }

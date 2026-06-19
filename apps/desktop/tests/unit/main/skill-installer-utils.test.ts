@@ -2,9 +2,8 @@ import * as childProcess from "child_process";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("child_process", async () => {
-  const actual = await vi.importActual<typeof import("child_process")>(
-    "child_process",
-  );
+  const actual =
+    await vi.importActual<typeof import("child_process")>("child_process");
 
   return {
     ...actual,
@@ -131,6 +130,86 @@ describe("skill-installer-utils", () => {
       expect(resolvedPath).toContain(".cline/skills");
     });
 
+    it("resolves the built-in Cherry Studio macOS skills path under the production data directory", () => {
+      const originalPlatform = process.platform;
+      const originalHome = process.env.HOME;
+
+      Object.defineProperty(process, "platform", {
+        value: "darwin",
+        configurable: true,
+      });
+      process.env.HOME = "/Users/TestUser";
+      vi.mocked(initDatabase).mockReturnValue({
+        prepare: vi
+          .fn()
+          .mockReturnValue({ get: vi.fn().mockReturnValue(undefined) }),
+      } as unknown as ReturnType<typeof initDatabase>);
+      invalidateCustomPathsCache();
+
+      const platform = getPlatformById("cherry-studio");
+      expect(platform).toBeDefined();
+      expect(getPlatformRootDir(platform!)).toBe(
+        "/Users/TestUser/Library/Application Support/CherryStudio",
+      );
+      expect(getPlatformSkillsDir(platform!)).toBe(
+        "/Users/TestUser/Library/Application Support/CherryStudio/Data/Skills",
+      );
+
+      Object.defineProperty(process, "platform", {
+        value: originalPlatform,
+        configurable: true,
+      });
+      process.env.HOME = originalHome;
+      invalidateCustomPathsCache();
+    });
+
+    it("resolves the built-in Cherry Studio Windows skills path under AppData", () => {
+      const originalPlatform = process.platform;
+      const originalHome = process.env.HOME;
+      const originalUserProfile = process.env.USERPROFILE;
+      const originalAppData = process.env.APPDATA;
+
+      Object.defineProperty(process, "platform", {
+        value: "win32",
+        configurable: true,
+      });
+      process.env.HOME = "C:\\Users\\TestUser";
+      process.env.USERPROFILE = "C:\\Users\\TestUser";
+      process.env.APPDATA = "C:\\Users\\TestUser\\AppData\\Roaming";
+      vi.mocked(initDatabase).mockReturnValue({
+        prepare: vi
+          .fn()
+          .mockReturnValue({ get: vi.fn().mockReturnValue(undefined) }),
+      } as unknown as ReturnType<typeof initDatabase>);
+      invalidateCustomPathsCache();
+
+      const platform = getPlatformById("cherry-studio");
+      expect(platform).toBeDefined();
+      expect(getPlatformRootDir(platform!)).toBe(
+        "C:\\Users\\TestUser\\AppData\\Roaming\\CherryStudio",
+      );
+      const skillsDir = getPlatformSkillsDir(platform!);
+      expect(skillsDir).toContain("CherryStudio");
+      expect(skillsDir).toContain("Data");
+      expect(skillsDir).toContain("Skills");
+      expect(skillsDir.replace(/[\\/]+/g, "\\")).toBe(
+        "C:\\Users\\TestUser\\AppData\\Roaming\\CherryStudio\\Data\\Skills",
+      );
+
+      Object.defineProperty(process, "platform", {
+        value: originalPlatform,
+        configurable: true,
+      });
+      process.env.HOME = originalHome;
+      process.env.USERPROFILE = originalUserProfile;
+      if (originalAppData === undefined) {
+        delete process.env.APPDATA;
+      } else {
+        process.env.APPDATA = originalAppData;
+      }
+      invalidateCustomPathsCache();
+    });
+
     it("resolves the Antigravity global skills path", () => {
       const getMock = vi.fn().mockReturnValue(undefined);
       vi.mocked(initDatabase).mockReturnValue({
@@ -249,7 +328,9 @@ describe("skill-installer-utils", () => {
       expect(platform).toBeDefined();
 
       expect(getPlatformRootDir(platform!)).toBe("/tmp/opencode-root");
-      expect(getPlatformSkillsDir(platform!)).toBe("/tmp/opencode-root/custom-skills");
+      expect(getPlatformSkillsDir(platform!)).toBe(
+        "/tmp/opencode-root/custom-skills",
+      );
       expect(getPlatformGlobalRulePath(platform!)).toBe(
         "/tmp/opencode-root/docs/AGENTS.md",
       );
@@ -267,7 +348,9 @@ describe("skill-installer-utils", () => {
       process.env.HOME = "C:\\Users\\TestUser";
       process.env.USERPROFILE = "C:\\Users\\TestUser";
       vi.mocked(initDatabase).mockReturnValue({
-        prepare: vi.fn().mockReturnValue({ get: vi.fn().mockReturnValue(undefined) }),
+        prepare: vi
+          .fn()
+          .mockReturnValue({ get: vi.fn().mockReturnValue(undefined) }),
       } as unknown as ReturnType<typeof initDatabase>);
       invalidateCustomPathsCache();
 
@@ -277,7 +360,9 @@ describe("skill-installer-utils", () => {
         "C:\\Users\\TestUser\\.config\\opencode",
       );
       const skillsDir = getPlatformSkillsDir(platform!);
-      expect(skillsDir.startsWith("C:\\Users\\TestUser\\.config\\opencode")).toBe(true);
+      expect(
+        skillsDir.startsWith("C:\\Users\\TestUser\\.config\\opencode"),
+      ).toBe(true);
       expect(skillsDir.endsWith("skills")).toBe(true);
 
       Object.defineProperty(process, "platform", {
@@ -301,7 +386,9 @@ describe("skill-installer-utils", () => {
       process.env.HOME = "C:\\Users\\TestUser";
       process.env.USERPROFILE = "C:\\Users\\TestUser";
       vi.mocked(initDatabase).mockReturnValue({
-        prepare: vi.fn().mockReturnValue({ get: vi.fn().mockReturnValue(undefined) }),
+        prepare: vi
+          .fn()
+          .mockReturnValue({ get: vi.fn().mockReturnValue(undefined) }),
       } as unknown as ReturnType<typeof initDatabase>);
       invalidateCustomPathsCache();
 
@@ -561,21 +648,53 @@ describe("skill-installer-utils", () => {
       );
     });
 
-    it("rejects non-HTTPS URL (HTTP)", () => {
-      expect(() =>
-        gitClone("http://github.com/user/repo", "/tmp/dest"),
-      ).toThrow(/Only HTTPS/);
+    it("rejects public HTTP URLs", async () => {
+      await expect(
+        gitClone("http://93.184.216.34/user/repo", "/tmp/dest"),
+      ).rejects.toThrow(/private-network HTTP/);
     });
 
-    it("rejects file:// protocol", () => {
-      expect(() => gitClone("file:///etc/passwd", "/tmp/dest")).toThrow(
-        /Only HTTPS/,
+    it("rejects file:// protocol", async () => {
+      await expect(gitClone("file:///etc/passwd", "/tmp/dest")).rejects.toThrow(
+        /private-network HTTP/,
       );
     });
 
-    it("rejects ftp:// protocol", () => {
-      expect(() => gitClone("ftp://example.com/repo", "/tmp/dest")).toThrow(
-        /Only HTTPS/,
+    it("rejects ftp:// protocol", async () => {
+      await expect(
+        gitClone("ftp://example.com/repo", "/tmp/dest"),
+      ).rejects.toThrow(/private-network HTTP/);
+    });
+
+    it("allows private-network HTTP clone URLs", async () => {
+      const closeHandlers: Array<(code: number) => void> = [];
+
+      vi.mocked(childProcess.spawn).mockReturnValue({
+        stdout: { on: vi.fn() },
+        stderr: { on: vi.fn() },
+        on: vi.fn((event, cb) => event === "close" && closeHandlers.push(cb)),
+        kill: vi.fn(),
+      } as unknown as childProcess.ChildProcess);
+
+      const promise = gitClone(
+        "http://192.168.31.12:3000/team/skills",
+        "/tmp/dest",
+      );
+      await vi.waitFor(() => expect(childProcess.spawn).toHaveBeenCalled());
+      closeHandlers[0]?.(0);
+
+      await expect(promise).resolves.toBeUndefined();
+      expect(childProcess.spawn).toHaveBeenCalledWith(
+        "git",
+        [
+          "clone",
+          "--depth",
+          "1",
+          "--",
+          "http://192.168.31.12:3000/team/skills",
+          "/tmp/dest",
+        ],
+        { stdio: ["ignore", "pipe", "pipe"] },
       );
     });
 
@@ -590,6 +709,7 @@ describe("skill-installer-utils", () => {
       } as unknown as childProcess.ChildProcess);
 
       const promise = gitClone("git@github.com:user/repo.git", "/tmp/dest");
+      await vi.waitFor(() => expect(childProcess.spawn).toHaveBeenCalled());
       closeHandlers[0]?.(0);
 
       await expect(promise).resolves.toBeUndefined();
@@ -605,7 +725,11 @@ describe("skill-installer-utils", () => {
         kill: vi.fn(),
       } as unknown as childProcess.ChildProcess);
 
-      const promise = gitClone("git@gitea.example.com:icelemon/skills.git", "/tmp/dest");
+      const promise = gitClone(
+        "git@gitea.example.com:icelemon/skills.git",
+        "/tmp/dest",
+      );
+      await vi.waitFor(() => expect(childProcess.spawn).toHaveBeenCalled());
       closeHandlers[0]?.(0);
 
       await expect(promise).resolves.toBeUndefined();
@@ -614,7 +738,9 @@ describe("skill-installer-utils", () => {
 
   describe("gitListRemoteBranches", () => {
     it("rejects empty URL", () => {
-      expect(() => gitListRemoteBranches("" as string)).toThrow(/cannot be empty/);
+      expect(() => gitListRemoteBranches("" as string)).toThrow(
+        /cannot be empty/,
+      );
     });
 
     it("parses remote branch names from git ls-remote output", async () => {
@@ -623,17 +749,20 @@ describe("skill-installer-utils", () => {
       const closeHandlers: Array<(code: number) => void> = [];
 
       vi.mocked(childProcess.spawn).mockReturnValue({
-        stdout: { on: vi.fn((event, cb) => event === "data" && stdoutHandlers.push(cb)) },
-        stderr: { on: vi.fn((event, cb) => event === "data" && stderrHandlers.push(cb)) },
+        stdout: {
+          on: vi.fn((event, cb) => event === "data" && stdoutHandlers.push(cb)),
+        },
+        stderr: {
+          on: vi.fn((event, cb) => event === "data" && stderrHandlers.push(cb)),
+        },
         on: vi.fn((event, cb) => event === "close" && closeHandlers.push(cb)),
         kill: vi.fn(),
       } as unknown as childProcess.ChildProcess);
 
       const promise = gitListRemoteBranches("git@github.com:demo/skills.git");
+      await vi.waitFor(() => expect(childProcess.spawn).toHaveBeenCalled());
       stdoutHandlers[0]?.(
-        Buffer.from(
-          "abc123\trefs/heads/main\ndef456\trefs/heads/release\n",
-        ),
+        Buffer.from("abc123\trefs/heads/main\ndef456\trefs/heads/release\n"),
       );
       closeHandlers[0]?.(0);
 
@@ -645,7 +774,9 @@ describe("skill-installer-utils", () => {
       const closeHandlers: Array<(code: number) => void> = [];
 
       vi.mocked(childProcess.spawn).mockReturnValue({
-        stdout: { on: vi.fn((event, cb) => event === "data" && stdoutHandlers.push(cb)) },
+        stdout: {
+          on: vi.fn((event, cb) => event === "data" && stdoutHandlers.push(cb)),
+        },
         stderr: { on: vi.fn() },
         on: vi.fn((event, cb) => event === "close" && closeHandlers.push(cb)),
         kill: vi.fn(),
@@ -655,6 +786,7 @@ describe("skill-installer-utils", () => {
         "https://github.com/anthropics/skills/tree/main/skills/.curated",
       );
 
+      await vi.waitFor(() => expect(childProcess.spawn).toHaveBeenCalled());
       expect(childProcess.spawn).toHaveBeenCalledWith(
         "git",
         ["ls-remote", "--heads", "--", "https://github.com/anthropics/skills"],
