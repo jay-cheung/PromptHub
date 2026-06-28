@@ -1,36 +1,38 @@
 <div align="center">
   <img src="./docs/imgs/icon.png" alt="PromptHub Logo" width="128" height="128" />
 
-  # PromptHub
+# PromptHub
 
-  本地优先的 Prompt、Skill 与 AI 编程资产工作台。
+本地优先的 Prompt、Skill 与 AI 编程资产工作台。
 
   <br/>
 
   <!-- Badges -->
-  [![GitHub Stars](https://img.shields.io/github/stars/legeling/PromptHub?style=for-the-badge&logo=github&color=yellow)](https://github.com/legeling/PromptHub/stargazers)
-  [![Downloads](https://img.shields.io/github/downloads/legeling/PromptHub/total?style=for-the-badge&logo=github&color=blue)](https://github.com/legeling/PromptHub/releases)
-  [![Version](https://img.shields.io/badge/release-v0.5.8_stable-22C55E?style=for-the-badge)](https://github.com/legeling/PromptHub/releases/latest)
-  [![License](https://img.shields.io/badge/license-AGPL--3.0-blue?style=for-the-badge)](./LICENSE)
+
+[![GitHub Stars](https://img.shields.io/github/stars/legeling/PromptHub?style=for-the-badge&logo=github&color=yellow)](https://github.com/legeling/PromptHub/stargazers)
+[![Downloads](https://img.shields.io/github/downloads/legeling/PromptHub/total?style=for-the-badge&logo=github&color=blue)](https://github.com/legeling/PromptHub/releases)
+[![Version](https://img.shields.io/badge/release-v0.5.8_stable-22C55E?style=for-the-badge)](https://github.com/legeling/PromptHub/releases/latest)
+[![License](https://img.shields.io/badge/license-AGPL--3.0-blue?style=for-the-badge)](./LICENSE)
 
   <br/>
 
   <!-- Tech Stack -->
-  ![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?style=flat-square&logo=typescript&logoColor=white)
-  ![Electron](https://img.shields.io/badge/Electron-47848F?style=flat-square&logo=electron&logoColor=white)
-  ![React](https://img.shields.io/badge/React-61DAFB?style=flat-square&logo=react&logoColor=black)
-  ![TailwindCSS](https://img.shields.io/badge/Tailwind-38B2AC?style=flat-square&logo=tailwind-css&logoColor=white)
-  ![SQLite](https://img.shields.io/badge/SQLite-003B57?style=flat-square&logo=sqlite&logoColor=white)
+
+![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?style=flat-square&logo=typescript&logoColor=white)
+![Electron](https://img.shields.io/badge/Electron-47848F?style=flat-square&logo=electron&logoColor=white)
+![React](https://img.shields.io/badge/React-61DAFB?style=flat-square&logo=react&logoColor=black)
+![TailwindCSS](https://img.shields.io/badge/Tailwind-38B2AC?style=flat-square&logo=tailwind-css&logoColor=white)
+![SQLite](https://img.shields.io/badge/SQLite-003B57?style=flat-square&logo=sqlite&logoColor=white)
 
   <br/>
 
-  ![macOS](https://img.shields.io/badge/macOS-000000?style=flat-square&logo=apple&logoColor=white)
-  ![Windows](https://img.shields.io/badge/Windows-0078D6?style=flat-square&logo=windows&logoColor=white)
-  ![Linux](https://img.shields.io/badge/Linux-FCC624?style=flat-square&logo=linux&logoColor=black)
+![macOS](https://img.shields.io/badge/macOS-000000?style=flat-square&logo=apple&logoColor=white)
+![Windows](https://img.shields.io/badge/Windows-0078D6?style=flat-square&logo=windows&logoColor=white)
+![Linux](https://img.shields.io/badge/Linux-FCC624?style=flat-square&logo=linux&logoColor=black)
 
   <br/>
 
-  [简体中文](./README.md) · [繁體中文](./docs/README.zh-TW.md) · [English](./docs/README.en.md) · [日本語](./docs/README.ja.md) · [Deutsch](./docs/README.de.md) · [Español](./docs/README.es.md) · [Français](./docs/README.fr.md)
+[简体中文](./README.md) · [繁體中文](./docs/README.zh-TW.md) · [English](./docs/README.en.md) · [日本語](./docs/README.ja.md) · [Deutsch](./docs/README.de.md) · [Español](./docs/README.es.md) · [Français](./docs/README.fr.md)
 
   <br/>
 
@@ -68,17 +70,17 @@ PromptHub 把你的 Prompt、SKILL.md 和项目级 AI 编程资产放进一个�
 
 ## 📥 桌面版下载
 
-最新稳定版 **v0.5.8**；当前预览版 **v0.5.9-beta.1** 已开放测试。稳定版直链继续指向 v0.5.8，预览版请从 GitHub Prerelease 下载：
+最新稳定版 **v0.5.8**；当前预览版 **v0.5.9-beta.2** 已开放测试。稳定版直链继续指向 v0.5.8，预览版请从 GitHub Prerelease 下载：
 
-- **直链下载** — 文件名固定，链接不会随版本变化，适合做长期书签或脚本调用（稳定版现已接入 CDN 镜像）
+- **直链下载** — 当前临时指向 GitHub 稳定版资产，避免 CDN 镜像未就绪时出现 404；镜像同步完成后会切回固定文件名 CDN 直链
 - **GitHub Releases** — 官方发布页，可下载历史版本、查看签名与 Release Notes
 
-| 平台    | 直链下载                                                                                                                                                                                                                                                                                                                                                                                                                                                  | GitHub Releases                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Windows | [![Windows x64](https://img.shields.io/badge/Windows_x64-0078D6?style=for-the-badge&logo=windows&logoColor=white)](https://pub-fff1cbc0121241d480624bd3de5a2735.r2.dev/latest/PromptHub-Setup-x64.exe) [![Windows arm64](https://img.shields.io/badge/Windows_arm64-0078D6?style=for-the-badge&logo=windows&logoColor=white)](https://pub-fff1cbc0121241d480624bd3de5a2735.r2.dev/latest/PromptHub-Setup-arm64.exe)                | [![Windows x64](https://img.shields.io/badge/Windows_x64-0078D6?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/legeling/PromptHub/releases/latest/download/PromptHub-Setup-0.5.8-x64.exe) [![Windows arm64](https://img.shields.io/badge/Windows_arm64-0078D6?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/legeling/PromptHub/releases/latest/download/PromptHub-Setup-0.5.8-arm64.exe)                  |
-| macOS   | [![macOS Apple Silicon](https://img.shields.io/badge/macOS_Apple_Silicon-000000?style=for-the-badge&logo=apple&logoColor=white)](https://pub-fff1cbc0121241d480624bd3de5a2735.r2.dev/latest/PromptHub-arm64.dmg) [![macOS Intel](https://img.shields.io/badge/macOS_Intel-000000?style=for-the-badge&logo=apple&logoColor=white)](https://pub-fff1cbc0121241d480624bd3de5a2735.r2.dev/latest/PromptHub-x64.dmg)                     | [![macOS Apple Silicon](https://img.shields.io/badge/macOS_Apple_Silicon-000000?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/legeling/PromptHub/releases/latest/download/PromptHub-0.5.8-arm64.dmg) [![macOS Intel](https://img.shields.io/badge/macOS_Intel-000000?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/legeling/PromptHub/releases/latest/download/PromptHub-0.5.8-x64.dmg)                       |
-| Linux   | [![Linux AppImage](https://img.shields.io/badge/Linux_AppImage-FCC624?style=for-the-badge&logo=linux&logoColor=black)](https://pub-fff1cbc0121241d480624bd3de5a2735.r2.dev/latest/PromptHub-x64.AppImage) [![Linux deb](https://img.shields.io/badge/Linux_deb-FCC624?style=for-the-badge&logo=linux&logoColor=black)](https://pub-fff1cbc0121241d480624bd3de5a2735.r2.dev/latest/PromptHub-amd64.deb)                              | [![Linux AppImage](https://img.shields.io/badge/Linux_AppImage-FCC624?style=for-the-badge&logo=linux&logoColor=black)](https://github.com/legeling/PromptHub/releases/latest/download/PromptHub-0.5.8-x64.AppImage) [![Linux deb](https://img.shields.io/badge/Linux_deb-FCC624?style=for-the-badge&logo=linux&logoColor=black)](https://github.com/legeling/PromptHub/releases/latest/download/PromptHub-0.5.8-amd64.deb)                                |
-| 预览版  | [![Preview v0.5.9-beta.1](https://img.shields.io/badge/Preview-0.5.9--beta.1-8B5CF6?style=for-the-badge&logo=github&logoColor=white)](https://github.com/legeling/PromptHub/releases/tag/v0.5.9-beta.1) | [GitHub Prerelease v0.5.9-beta.1](https://github.com/legeling/PromptHub/releases/tag/v0.5.9-beta.1) |
+| 平台    | 直链下载                                                                                                                                                                                                                                                                                                                                                                                                                                | GitHub Releases                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Windows | [![Windows x64](https://img.shields.io/badge/Windows_x64-0078D6?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/legeling/PromptHub/releases/latest/download/PromptHub-Setup-0.5.8-x64.exe) [![Windows arm64](https://img.shields.io/badge/Windows_arm64-0078D6?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/legeling/PromptHub/releases/latest/download/PromptHub-Setup-0.5.8-arm64.exe) | [![Windows x64](https://img.shields.io/badge/Windows_x64-0078D6?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/legeling/PromptHub/releases/latest/download/PromptHub-Setup-0.5.8-x64.exe) [![Windows arm64](https://img.shields.io/badge/Windows_arm64-0078D6?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/legeling/PromptHub/releases/latest/download/PromptHub-Setup-0.5.8-arm64.exe) |
+| macOS   | [![macOS Apple Silicon](https://img.shields.io/badge/macOS_Apple_Silicon-000000?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/legeling/PromptHub/releases/latest/download/PromptHub-0.5.8-arm64.dmg) [![macOS Intel](https://img.shields.io/badge/macOS_Intel-000000?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/legeling/PromptHub/releases/latest/download/PromptHub-0.5.8-x64.dmg)     | [![macOS Apple Silicon](https://img.shields.io/badge/macOS_Apple_Silicon-000000?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/legeling/PromptHub/releases/latest/download/PromptHub-0.5.8-arm64.dmg) [![macOS Intel](https://img.shields.io/badge/macOS_Intel-000000?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/legeling/PromptHub/releases/latest/download/PromptHub-0.5.8-x64.dmg)     |
+| Linux   | [![Linux AppImage](https://img.shields.io/badge/Linux_AppImage-FCC624?style=for-the-badge&logo=linux&logoColor=black)](https://github.com/legeling/PromptHub/releases/latest/download/PromptHub-0.5.8-x64.AppImage) [![Linux deb](https://img.shields.io/badge/Linux_deb-FCC624?style=for-the-badge&logo=linux&logoColor=black)](https://github.com/legeling/PromptHub/releases/latest/download/PromptHub-0.5.8-amd64.deb)              | [![Linux AppImage](https://img.shields.io/badge/Linux_AppImage-FCC624?style=for-the-badge&logo=linux&logoColor=black)](https://github.com/legeling/PromptHub/releases/latest/download/PromptHub-0.5.8-x64.AppImage) [![Linux deb](https://img.shields.io/badge/Linux_deb-FCC624?style=for-the-badge&logo=linux&logoColor=black)](https://github.com/legeling/PromptHub/releases/latest/download/PromptHub-0.5.8-amd64.deb)              |
+| 预览版  | [![Preview v0.5.9-beta.2](https://img.shields.io/badge/Preview-0.5.9--beta.2-8B5CF6?style=for-the-badge&logo=github&logoColor=white)](https://github.com/legeling/PromptHub/releases/tag/v0.5.9-beta.2)                                                                                                                                                                                                                                 | [GitHub Prerelease v0.5.9-beta.2](https://github.com/legeling/PromptHub/releases/tag/v0.5.9-beta.2)                                                                                                                                                                                                                                                                                                                                     |
 
 > **macOS 选哪个？** Apple Silicon（M1/M2/M3/M4）选 `arm64`，Intel Mac 选 `x64`。
 > **Windows 选哪个？** 绝大多数选 `x64`，只有 Surface Pro X 这类 ARM 设备选 `arm64`。
@@ -319,6 +321,15 @@ workspace export / import
 
 完整版本说明：**[CHANGELOG.md](./CHANGELOG.md)**
 
+### v0.5.9-beta.2（2026-06-27，预览版）
+
+- Plugin 管理预览扩展：My Plugins / Plugin Store / Agent Plugin 对齐 Skill 风格，支持安装、详情、版本快照、来源更新、批量操作、Agent 分发和子 Skill / MCP 导入
+- 整套 Agent 资产同步：自托管同步与备份恢复纳入 My Skills、My MCP、My Plugins 和 Rules 等数据
+- 网络配置中心：设置页新增网络分类，集中管理代理和镜像源，网络请求复用统一代理策略
+- CLI 项目工作流优化：支持从当前目录交互式选择我的 Skill、路径安装和更完整的 AI 配置命令
+- Skill 来源更新校验改为内容指纹/目录对比，忽略缓存、隐藏产物和 PromptHub 元数据，减少误报
+- MCP / Plugin UI 继续复用 Skill 布局，标签筛选统一放在左下角，卡片宽度、更新提示和分发入口保持一致
+
 ### v0.5.9-beta.1（2026-06-14，预览版）
 
 - MCP 管理工作台预览版：新增本地 MCP 库、官方模板商店、Agent 目标分发、健康检查、按需导入 .env 和 CLI MCP 命令
@@ -409,11 +420,11 @@ workspace export / import
 
 ## 路线图
 
-### v0.5.9-beta.1 ← 当前预览版
+### v0.5.9-beta.2 ← 当前预览版
 
-- MCP 管理进入桌面预览：本地库、模板商店、Agent 分发、健康检查与 CLI 命令打通
-- Prompt 关系树、语义关系面板和拖拽分组进入现有 Prompt 工作流
-- Git / SSH Skill 导入、大仓库结果浏览、图片资源预览和标题复制体验继续打磨
+- Plugin / MCP 管理继续向 Skill 体验对齐，覆盖商店、Agent 分发、详情、标签筛选和更新提示
+- Agent 资产同步、网络代理、CLI 项目安装和 Skill 来源更新检查进入 beta2 验证
+- Prompt 关系树、Windows Agent 路径、Web 验证码开关和发布链路修复随 beta2 提供给测试用户
 
 ### v0.5.8 ← 当前稳定版
 
@@ -481,17 +492,17 @@ pnpm build:web
 
 常用开发命令：
 
-| 命令 | 用途 |
-| ---- | ---- |
-| `pnpm electron:dev` | 启动桌面端开发环境（vite + electron） |
-| `pnpm dev:web` | 启动 Web 开发环境 |
-| `pnpm lint` / `pnpm lint:web` | 代码风格检查 |
-| `pnpm typecheck` / `pnpm typecheck:web` | TypeScript 类型检查 |
-| `pnpm test -- --run` | 桌面端 vitest 单元 + 集成测试 |
-| `pnpm test:e2e` | Playwright e2e |
-| `pnpm verify:web` | Web lint + typecheck + test + build |
-| `pnpm test:release` | 桌面端发布前完整门禁 |
-| `pnpm --filter @prompthub/desktop bundle:budget` | 桌面端 bundle 体积预算检查 |
+| 命令                                             | 用途                                  |
+| ------------------------------------------------ | ------------------------------------- |
+| `pnpm electron:dev`                              | 启动桌面端开发环境（vite + electron） |
+| `pnpm dev:web`                                   | 启动 Web 开发环境                     |
+| `pnpm lint` / `pnpm lint:web`                    | 代码风格检查                          |
+| `pnpm typecheck` / `pnpm typecheck:web`          | TypeScript 类型检查                   |
+| `pnpm test -- --run`                             | 桌面端 vitest 单元 + 集成测试         |
+| `pnpm test:e2e`                                  | Playwright e2e                        |
+| `pnpm verify:web`                                | Web lint + typecheck + test + build   |
+| `pnpm test:release`                              | 桌面端发布前完整门禁                  |
+| `pnpm --filter @prompthub/desktop bundle:budget` | 桌面端 bundle 体积预算检查            |
 
 <div id="project-structure"></div>
 

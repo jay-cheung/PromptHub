@@ -36,6 +36,7 @@ import {
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { useUIStore } from "../../stores/ui.store";
+import type { CreatePromptDTO } from "@prompthub/shared/types";
 import { collectPrivateFolderScopeIds } from "../../services/prompt-filter";
 import {
   filterVisibleScannedSkills,
@@ -76,6 +77,7 @@ const TopBarRulesSearch = lazy(() =>
 
 const OPEN_CREATE_SKILL_PROJECT_MODAL_EVENT = "open-create-skill-project-modal";
 const OPEN_CREATE_MCP_MODAL_EVENT = "open-create-mcp-modal";
+const OPEN_ADD_PLUGIN_MODAL_EVENT = "open-add-plugin-modal";
 
 interface TopBarProps {
   onOpenSettings: () => void;
@@ -93,6 +95,7 @@ export function TopBar({
   const promptSearchQuery = usePromptStore((state) => state.searchQuery);
   const setPromptSearchQuery = usePromptStore((state) => state.setSearchQuery);
   const prompts = usePromptStore((state) => state.prompts);
+  const selectedPromptId = usePromptStore((state) => state.selectedId);
   const selectPrompt = usePromptStore((state) => state.selectPrompt);
   const createPrompt = usePromptStore((state) => state.createPrompt);
 
@@ -157,7 +160,19 @@ export function TopBar({
   const isSkillView = appModule === "skill";
   const isPromptView = appModule === "prompt";
   const showTopBarSearch = !isSkillStoreCatalogView;
-  const showCreateButton = isPromptView || isSkillView || isMcpView;
+  const showCreateButton =
+    isPromptView || isSkillView || isMcpView || isPluginView;
+  const selectedPromptForCreate = useMemo(() => {
+    if (!isPromptView || !selectedPromptId) {
+      return null;
+    }
+
+    return prompts.find((prompt) => prompt.id === selectedPromptId) ?? null;
+  }, [isPromptView, prompts, selectedPromptId]);
+  const defaultCreateParentId = selectedPromptForCreate?.id;
+  const defaultCreateFolderId = selectedPromptForCreate
+    ? selectedPromptForCreate.folderId || undefined
+    : selectedFolderId || undefined;
 
   // Unified search query based on mode
   const searchQuery = isSkillView
@@ -550,19 +565,7 @@ export function TopBar({
     };
   }, [webRuntime]);
 
-  const handleCreatePrompt = async (data: {
-    title: string;
-    description?: string;
-    promptType?: "text" | "image";
-    systemPrompt?: string;
-    systemPromptEn?: string;
-    userPrompt: string;
-    userPromptEn?: string;
-    tags?: string[];
-    images?: string[];
-    folderId?: string;
-    source?: string;
-  }) => {
+  const handleCreatePrompt = async (data: CreatePromptDTO) => {
     try {
       const prompt = await createPrompt({
         title: data.title,
@@ -573,10 +576,17 @@ export function TopBar({
         userPrompt: data.userPrompt,
         userPromptEn: data.userPromptEn,
         tags: data.tags || [],
-        variables: [],
+        variables: data.variables || [],
         images: data.images,
-        folderId: data.folderId,
+        videos: data.videos,
+        folderId:
+          data.folderId !== undefined ? data.folderId : defaultCreateFolderId,
+        parentId:
+          data.parentId !== undefined ? data.parentId : defaultCreateParentId,
+        order: data.order,
+        visibility: data.visibility,
         source: data.source,
+        notes: data.notes,
       });
       setIsCreateModalOpen(false);
       return prompt;
@@ -776,7 +786,7 @@ export function TopBar({
               </>
             )}
 
-          {/* Split Button for New Prompt / New Skill / New MCP */}
+          {/* Split Button for New Prompt / New Skill / New MCP / New Plugin */}
           {showCreateButton && (
             <div
               ref={createMenuRef}
@@ -797,6 +807,10 @@ export function TopBar({
                   } else if (appModule === "mcp") {
                     document.dispatchEvent(
                       new CustomEvent(OPEN_CREATE_MCP_MODAL_EVENT),
+                    );
+                  } else if (appModule === "plugin") {
+                    document.dispatchEvent(
+                      new CustomEvent(OPEN_ADD_PLUGIN_MODAL_EVENT),
                     );
                   } else {
                     const mode = useSettingsStore.getState().creationMode;
@@ -819,7 +833,7 @@ export function TopBar({
                   ) : (
                     <PlusIcon aria-hidden="true" className="w-4 h-4" />
                   )
-                ) : appModule === "mcp" ? (
+                ) : appModule === "mcp" || appModule === "plugin" ? (
                   <PlusIcon aria-hidden="true" className="w-4 h-4" />
                 ) : creationMode === "manual" ? (
                   <PlusIcon aria-hidden="true" className="w-4 h-4" />
@@ -831,7 +845,7 @@ export function TopBar({
                     ? isProjectSkillView
                       ? t("skill.addProject", "Add Project")
                       : t("header.new")
-                    : appModule === "mcp"
+                    : appModule === "mcp" || appModule === "plugin"
                       ? t("header.new")
                       : creationMode === "manual"
                         ? t("header.new")
@@ -1028,7 +1042,7 @@ export function TopBar({
           isOpen={isCreateModalOpen}
           onClose={() => setIsCreateModalOpen(false)}
           onCreate={handleCreatePrompt}
-          defaultFolderId={selectedFolderId || undefined}
+          defaultFolderId={defaultCreateFolderId}
           defaultPromptType={promptTypeFilter === "image" ? "image" : "text"}
         />
 
@@ -1045,7 +1059,7 @@ export function TopBar({
           isOpen={isImageReverseModalOpen}
           onClose={() => setIsImageReverseModalOpen(false)}
           onCreate={handleCreatePrompt}
-          defaultFolderId={selectedFolderId || undefined}
+          defaultFolderId={defaultCreateFolderId}
         />
 
         {/* 新建 Skill 弹窗 */}

@@ -98,6 +98,12 @@ importers:
       d3-force:
         specifier: ^3.0.0
         version: 3.0.0
+      http-proxy-agent:
+        specifier: ^7.0.2
+        version: 7.0.2
+      https-proxy-agent:
+        specifier: ^7.0.6
+        version: 7.0.6
       material-icon-theme:
         specifier: ^5.35.0
         version: 5.35.0
@@ -107,6 +113,12 @@ importers:
       react-force-graph-2d:
         specifier: ^1.29.1
         version: 1.29.1(react@18.3.1)
+      socks-proxy-agent:
+        specifier: ^7.0.0
+        version: 7.0.0
+      undici:
+        specifier: ^7.24.8
+        version: 7.24.8
     devDependencies:
       '@dnd-kit/core':
         specifier: ^6.3.1
@@ -459,6 +471,9 @@ importers:
       '@types/node':
         specifier: ^24.0.0
         version: 24.12.4
+      typescript:
+        specifier: 5.9.3
+        version: 5.9.3
 
   packages/db:
     dependencies:
@@ -478,8 +493,15 @@ importers:
       '@types/uuid':
         specifier: ^10.0.0
         version: 10.0.0
+      typescript:
+        specifier: 5.9.3
+        version: 5.9.3
 
-  packages/shared: {}
+  packages/shared:
+    devDependencies:
+      typescript:
+        specifier: 5.9.3
+        version: 5.9.3
 
 packages:
 

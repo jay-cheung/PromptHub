@@ -1,13 +1,16 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import i18n, { changeLanguage } from "../i18n";
+import { DEFAULT_NETWORK_PROXY_SETTINGS } from "@prompthub/shared/types";
 import type {
   BuiltinAgentOverrideConfig,
   CustomAgentConfig,
+  NetworkProxySettings,
   Settings,
   SkillProject,
   SyncProviderKind,
 } from "@prompthub/shared/types";
+import { normalizeNetworkProxySettings } from "@prompthub/shared/utils/network-proxy";
 import type { UpdateChannel } from "@prompthub/shared/types";
 import type { AIProtocol } from "@prompthub/shared/types";
 import { isPrereleaseVersion } from "../../utils/version";
@@ -73,7 +76,13 @@ const DEFAULT_BACKGROUND_IMAGE_OPACITY = 1;
 const DEFAULT_BACKGROUND_IMAGE_BLUR = 0;
 const LEGACY_BACKGROUND_IMAGE_BLUR_DEFAULT = 14;
 const LOCAL_IMAGE_PROTOCOL_PREFIX = "local-image://";
-export const DESKTOP_HOME_MODULES = ["prompt", "skill", "mcp", "plugin", "rules"] as const;
+export const DESKTOP_HOME_MODULES = [
+  "prompt",
+  "skill",
+  "mcp",
+  "plugin",
+  "rules",
+] as const;
 export type DesktopHomeModule = (typeof DESKTOP_HOME_MODULES)[number];
 type ShortcutMode = "global" | "local";
 const DEFAULT_SHORTCUT_MODES: Record<string, ShortcutMode> = {
@@ -120,11 +129,11 @@ function normalizeSkillProjects(value: unknown): SkillProject[] {
     .filter((project): project is Partial<SkillProject> => {
       return Boolean(
         project &&
-          typeof project === "object" &&
-          !Array.isArray(project) &&
-          typeof project.id === "string" &&
-          typeof project.name === "string" &&
-          typeof project.rootPath === "string",
+        typeof project === "object" &&
+        !Array.isArray(project) &&
+        typeof project.id === "string" &&
+        typeof project.name === "string" &&
+        typeof project.rootPath === "string",
       );
     })
     .map((project) => {
@@ -156,9 +165,13 @@ function normalizeSkillProjects(value: unknown): SkillProject[] {
           normalizedRootPath,
         ),
         createdAt:
-          typeof project.createdAt === "number" ? project.createdAt : Date.now(),
+          typeof project.createdAt === "number"
+            ? project.createdAt
+            : Date.now(),
         updatedAt:
-          typeof project.updatedAt === "number" ? project.updatedAt : Date.now(),
+          typeof project.updatedAt === "number"
+            ? project.updatedAt
+            : Date.now(),
         lastScannedAt:
           typeof project.lastScannedAt === "number"
             ? project.lastScannedAt
@@ -400,7 +413,9 @@ function normalizeDesktopHomeModules(
     return [...DESKTOP_HOME_MODULES];
   }
 
-  return options.includeNewDefaults ? addNewDefaultDesktopModules(deduped) : deduped;
+  return options.includeNewDefaults
+    ? addNewDefaultDesktopModules(deduped)
+    : deduped;
 }
 
 function normalizeTagFilterMode(value: unknown): TagFilterMode {
@@ -503,16 +518,16 @@ function normalizePersistedAIModels(value: unknown): AIModelConfig[] {
     .filter((model): model is Partial<AIModelConfig> => {
       return Boolean(
         model &&
-          typeof model === "object" &&
-          !Array.isArray(model) &&
-          typeof model.id === "string" &&
-          model.id.trim().length > 0 &&
-          typeof model.provider === "string" &&
-          model.provider.trim().length > 0 &&
-          typeof model.apiUrl === "string" &&
-          model.apiUrl.trim().length > 0 &&
-          typeof model.model === "string" &&
-          model.model.trim().length > 0,
+        typeof model === "object" &&
+        !Array.isArray(model) &&
+        typeof model.id === "string" &&
+        model.id.trim().length > 0 &&
+        typeof model.provider === "string" &&
+        model.provider.trim().length > 0 &&
+        typeof model.apiUrl === "string" &&
+        model.apiUrl.trim().length > 0 &&
+        typeof model.model === "string" &&
+        model.model.trim().length > 0,
       );
     })
     .map((model) => {
@@ -546,14 +561,14 @@ function normalizePersistedAIProviders(value: unknown): AIProviderConfig[] {
     .filter((provider): provider is Partial<AIProviderConfig> => {
       return Boolean(
         provider &&
-          typeof provider === "object" &&
-          !Array.isArray(provider) &&
-          typeof provider.id === "string" &&
-          provider.id.trim().length > 0 &&
-          typeof provider.provider === "string" &&
-          provider.provider.trim().length > 0 &&
-          typeof provider.apiUrl === "string" &&
-          provider.apiUrl.trim().length > 0,
+        typeof provider === "object" &&
+        !Array.isArray(provider) &&
+        typeof provider.id === "string" &&
+        provider.id.trim().length > 0 &&
+        typeof provider.provider === "string" &&
+        provider.provider.trim().length > 0 &&
+        typeof provider.apiUrl === "string" &&
+        provider.apiUrl.trim().length > 0,
       );
     })
     .map((provider) => {
@@ -597,9 +612,7 @@ function normalizeAIUsageScenario(value: unknown): AIUsageScenario | null {
     : null;
 }
 
-function normalizeScenarioModelDefaults(
-  value: unknown,
-): ScenarioModelDefaults {
+function normalizeScenarioModelDefaults(value: unknown): ScenarioModelDefaults {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return {};
   }
@@ -701,12 +714,35 @@ function normalizeTagsSectionHeight(value: unknown): number {
 }
 
 function normalizeSidebarTagSectionHeights(
-  next: Pick<SettingsState, "tagsSectionHeight" | "skillTagsSectionHeight">,
+  next: Pick<
+    SettingsState,
+    "tagsSectionHeight" | "skillTagsSectionHeight" | "resourceTagsSectionHeight"
+  >,
 ): void {
   next.tagsSectionHeight = normalizeTagsSectionHeight(next.tagsSectionHeight);
   next.skillTagsSectionHeight = normalizeTagsSectionHeight(
     next.skillTagsSectionHeight,
   );
+  next.resourceTagsSectionHeight = normalizeTagsSectionHeight(
+    next.resourceTagsSectionHeight,
+  );
+}
+
+function migrateResourceTagSectionSettings(
+  next: SettingsState,
+  persistedState: unknown,
+): void {
+  if (!persistedState || typeof persistedState !== "object") {
+    return;
+  }
+
+  const persisted = persistedState as Record<string, unknown>;
+  if (!("resourceTagsSectionHeight" in persisted)) {
+    next.resourceTagsSectionHeight = next.skillTagsSectionHeight;
+  }
+  if (!("isResourceTagsSectionCollapsed" in persisted)) {
+    next.isResourceTagsSectionCollapsed = next.isSkillTagsSectionCollapsed;
+  }
 }
 
 function normalizeSyncTimingSettings(
@@ -735,9 +771,7 @@ function normalizeSyncTimingSettings(
   next.selfHostedAutoSyncInterval = normalizeAutoSyncInterval(
     next.selfHostedAutoSyncInterval,
   );
-  next.s3AutoSyncInterval = normalizeAutoSyncInterval(
-    next.s3AutoSyncInterval,
-  );
+  next.s3AutoSyncInterval = normalizeAutoSyncInterval(next.s3AutoSyncInterval);
 }
 
 function normalizeSkillListPageSize(value: unknown): number {
@@ -1262,6 +1296,8 @@ interface SettingsState {
   // Sidebar settings
   tagsSectionHeight: number;
   isTagsSectionCollapsed: boolean;
+  resourceTagsSectionHeight: number;
+  isResourceTagsSectionCollapsed: boolean;
   skillTagsSectionHeight: number;
   isSkillTagsSectionCollapsed: boolean;
   desktopHomeModules: DesktopHomeModule[];
@@ -1308,6 +1344,7 @@ interface SettingsState {
   autoScanStoreSkillsBeforeInstall: boolean;
 
   githubToken: string;
+  networkProxy: NetworkProxySettings;
 
   // Actions
   setThemeMode: (mode: ThemeMode) => void;
@@ -1382,6 +1419,8 @@ interface SettingsState {
   inferUpdateChannel: (version: string) => void;
   setTagsSectionHeight: (height: number) => void;
   setIsTagsSectionCollapsed: (collapsed: boolean) => void;
+  setResourceTagsSectionHeight: (height: number) => void;
+  setIsResourceTagsSectionCollapsed: (collapsed: boolean) => void;
   setSkillTagsSectionHeight: (height: number) => void;
   setIsSkillTagsSectionCollapsed: (collapsed: boolean) => void;
   toggleDesktopHomeModule: (moduleId: DesktopHomeModule) => void;
@@ -1476,6 +1515,7 @@ interface SettingsState {
   setAutoScanStoreSkillsBeforeInstall: (enabled: boolean) => void;
   // GitHub token action — see #108
   setGithubToken: (token: string) => void;
+  setNetworkProxy: (updates: Partial<NetworkProxySettings>) => void;
 }
 
 function syncSettingsToMain(settings: Partial<Settings>): Promise<void> {
@@ -1561,9 +1601,7 @@ function findMatchingAIProvider(
   );
 }
 
-function buildAISettingsSyncPayload(
-  state: SettingsState,
-): Partial<Settings> {
+function buildAISettingsSyncPayload(state: SettingsState): Partial<Settings> {
   return {
     aiProvider: state.aiProvider,
     aiApiProtocol: state.aiApiProtocol,
@@ -1666,12 +1704,17 @@ export async function loadSettingsFromMainProcess(): Promise<void> {
   const modelRouteDefaults = normalizeModelRouteDefaults(
     aiSettings.modelRouteDefaults ?? state.modelRouteDefaults,
   );
+  const networkProxy = normalizeNetworkProxySettings(
+    settings.networkProxy ?? state.networkProxy,
+  );
   const aiProvider =
     typeof aiSettings.aiProvider === "string"
       ? aiSettings.aiProvider
       : state.aiProvider;
   const aiApiUrl =
-    typeof aiSettings.aiApiUrl === "string" ? aiSettings.aiApiUrl : state.aiApiUrl;
+    typeof aiSettings.aiApiUrl === "string"
+      ? aiSettings.aiApiUrl
+      : state.aiApiUrl;
   const aiApiProtocol = normalizeAIProtocol(
     aiSettings.aiApiProtocol ?? state.aiApiProtocol,
     aiProvider,
@@ -1701,10 +1744,13 @@ export async function loadSettingsFromMainProcess(): Promise<void> {
         : state.aiApiKey,
     aiApiUrl,
     aiModel:
-      typeof aiSettings.aiModel === "string" ? aiSettings.aiModel : state.aiModel,
+      typeof aiSettings.aiModel === "string"
+        ? aiSettings.aiModel
+        : state.aiModel,
     aiProviders,
     aiModels,
     modelRouteDefaults,
+    networkProxy,
   });
 
   if (typeof settings.launchAtStartup !== "boolean") {
@@ -1717,6 +1763,10 @@ export async function loadSettingsFromMainProcess(): Promise<void> {
 
   if (settings.sync?.provider !== syncProvider) {
     syncSettingsToMain({ sync: buildMainProcessSyncSettings(syncProvider) });
+  }
+
+  if (!settings.networkProxy) {
+    syncSettingsToMain({ networkProxy });
   }
 }
 
@@ -1829,6 +1879,8 @@ export const useSettingsStore = create<SettingsState>()(
         updateChannelExplicitlySet: false,
         tagsSectionHeight: DEFAULT_TAGS_SECTION_HEIGHT,
         isTagsSectionCollapsed: false,
+        resourceTagsSectionHeight: DEFAULT_TAGS_SECTION_HEIGHT,
+        isResourceTagsSectionCollapsed: false,
         skillTagsSectionHeight: DEFAULT_TAGS_SECTION_HEIGHT,
         isSkillTagsSectionCollapsed: false,
         desktopHomeModules: [...DESKTOP_HOME_MODULES],
@@ -1861,6 +1913,7 @@ export const useSettingsStore = create<SettingsState>()(
         autoScanInstalledSkills: false,
         autoScanStoreSkillsBeforeInstall: false,
         githubToken: "",
+        networkProxy: { ...DEFAULT_NETWORK_PROXY_SETTINGS },
 
         setCreationMode: (mode) =>
           setTouched({ creationMode: normalizeCreationMode(mode) }),
@@ -2288,12 +2341,22 @@ export const useSettingsStore = create<SettingsState>()(
           setTouched({ tagsSectionHeight: normalizeTagsSectionHeight(height) }),
         setIsTagsSectionCollapsed: (collapsed) =>
           setTouched({ isTagsSectionCollapsed: collapsed }),
-        setSkillTagsSectionHeight: (height) =>
+        setResourceTagsSectionHeight: (height) => {
+          const normalizedHeight = normalizeTagsSectionHeight(height);
           setTouched({
-            skillTagsSectionHeight: normalizeTagsSectionHeight(height),
+            resourceTagsSectionHeight: normalizedHeight,
+            skillTagsSectionHeight: normalizedHeight,
+          });
+        },
+        setIsResourceTagsSectionCollapsed: (collapsed) =>
+          setTouched({
+            isResourceTagsSectionCollapsed: collapsed,
+            isSkillTagsSectionCollapsed: collapsed,
           }),
+        setSkillTagsSectionHeight: (height) =>
+          get().setResourceTagsSectionHeight(height),
         setIsSkillTagsSectionCollapsed: (collapsed) =>
-          setTouched({ isSkillTagsSectionCollapsed: collapsed }),
+          get().setIsResourceTagsSectionCollapsed(collapsed),
         setSkillListPageSize: (pageSize) =>
           setTouched({
             skillListPageSize: normalizeSkillListPageSize(pageSize),
@@ -2418,7 +2481,9 @@ export const useSettingsStore = create<SettingsState>()(
               (provider) => provider.id !== id,
             ),
             aiModels: get().aiModels.map((model) =>
-              model.providerId === id ? { ...model, providerId: undefined } : model,
+              model.providerId === id
+                ? { ...model, providerId: undefined }
+                : model,
             ),
           });
         },
@@ -3027,6 +3092,14 @@ export const useSettingsStore = create<SettingsState>()(
           setTouched({ githubToken: sanitized });
           syncSettingsToMain({ githubToken: sanitized });
         },
+        setNetworkProxy: (updates) => {
+          const networkProxy = normalizeNetworkProxySettings({
+            ...get().networkProxy,
+            ...updates,
+          });
+          setTouched({ networkProxy });
+          syncSettingsToMain({ networkProxy });
+        },
       };
     },
     {
@@ -3069,6 +3142,8 @@ export const useSettingsStore = create<SettingsState>()(
         next.skillListPageSize = normalizeSkillListPageSize(
           next.skillListPageSize,
         );
+        next.networkProxy = normalizeNetworkProxySettings(next.networkProxy);
+        migrateResourceTagSectionSettings(next, persistedState);
         normalizeSidebarTagSectionHeights(next);
         next.desktopHomeModules = normalizeDesktopHomeModules(
           next.desktopHomeModules,
@@ -3116,6 +3191,7 @@ export const useSettingsStore = create<SettingsState>()(
         );
         next.aiModels = normalizePersistedAIModels(next.aiModels);
         next.aiProviders = normalizePersistedAIProviders(next.aiProviders);
+        migrateResourceTagSectionSettings(next, state);
         normalizeSidebarTagSectionHeights(next);
         normalizeAIModelDefaults(next);
         next.promptTagCatalog = normalizePromptTagCatalog(
@@ -3207,6 +3283,7 @@ export const useSettingsStore = create<SettingsState>()(
         if (typeof next.autoScanStoreSkillsBeforeInstall !== "boolean") {
           next.autoScanStoreSkillsBeforeInstall = false;
         }
+        next.networkProxy = normalizeNetworkProxySettings(next.networkProxy);
         if (typeof next.backgroundImageEnabled !== "boolean") {
           next.backgroundImageEnabled = true;
         }
@@ -3290,6 +3367,7 @@ export const useSettingsStore = create<SettingsState>()(
           customSkillPlatformPaths: state?.customSkillPlatformPaths || {},
           skillPlatformOrder: state?.skillPlatformOrder || [],
           skillProjects: state?.skillProjects || [],
+          networkProxy: normalizeNetworkProxySettings(state?.networkProxy),
           sync: buildMainProcessSyncSettings(hydratedSyncProvider),
         });
       },

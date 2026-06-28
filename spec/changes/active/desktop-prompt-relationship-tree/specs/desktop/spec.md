@@ -142,3 +142,51 @@ child counts appear or disappear.
 - THEN PromptHub does not render an empty collapse affordance before the title
 - AND hierarchy decoration does not draw over the parent prompt label or prompt
   content.
+
+### Requirement: Child Count Sorting
+
+The desktop prompt sort menu MUST include child-count sort options for users
+who want to surface grouping hubs or leaf prompts.
+
+#### Scenario: Sort By Direct Child Count
+
+- GIVEN the current prompt collection contains parent-child prompt hierarchy
+- WHEN the user chooses child count descending
+- THEN prompts with more direct visible child prompts sort before prompts with
+  fewer direct visible child prompts
+- WHEN the user chooses child count ascending
+- THEN prompts with fewer direct visible child prompts sort before prompts with
+  more direct visible child prompts
+- AND pinned prompts only sort before unpinned prompts when their direct child
+  counts are equal.
+- AND the card and table tree display preserves that sort order after
+  flattening parent-child hierarchy for rendering.
+
+### Requirement: Create Child From Selected Prompt Node
+
+When users create a prompt while a prompt node is selected, PromptHub MUST
+default the new prompt to that selected node's child instead of creating a
+same-level sibling.
+
+#### Scenario: Create Prompt Under Selected Prompt Node
+
+- GIVEN the desktop prompt module has prompt A selected
+- WHEN the user creates a new prompt from the top-bar create action
+- THEN the created prompt payload uses prompt A's id as `parentId`
+- AND the created prompt inherits prompt A's folder when the create form does
+  not explicitly provide another folder
+- AND callers can still explicitly pass `parentId: null` to create a root
+  prompt.
+
+### Requirement: Stronger Child Indentation
+
+Prompt tree rows/cards MUST use enough indentation for users to visually
+distinguish children from parents.
+
+#### Scenario: Render Child Prompt Indentation
+
+- GIVEN a nested prompt is displayed in the compact card tree
+- WHEN PromptHub renders that prompt at depth N
+- THEN the title row is indented by the configured per-level tree indent
+- AND parent chips stay aligned with the title content instead of collapsing
+  back toward the parent row.

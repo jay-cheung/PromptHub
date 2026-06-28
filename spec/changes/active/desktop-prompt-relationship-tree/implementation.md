@@ -1,5 +1,85 @@
 # Implementation
 
+## 2026-06-26 Child-count Sorting Regression Hardening
+
+- Fixed the prompt-list resize handle hit target so it no longer sits on top
+  of the prompt list scrollbar. The handle hit area now lives outside the list
+  pane while the visible divider stays aligned to the pane boundary.
+- Added `ColumnResizer` coverage for start-pinned divider rendering, preserving
+  the scroll-pane-safe hit-target layout.
+- Added service-level regressions for child-count sorting so only direct
+  visible children are counted and pinned prompts only win ties with the same
+  child count.
+- Added display-flattening regressions so prompt card/table tree rendering
+  preserves the caller's already-sorted input order for both root and child
+  sibling groups instead of reverting to stored `order`.
+- Added TopBar regressions for the search clear button in Skill, MCP, and
+  Plugin modules so the active module search is cleared without mutating prompt
+  search state.
+- Added a prompt copy regression that user-prompt copy output excludes the
+  system prompt and `[System]` / `[User]` role labels.
+- Removed local Playwright CLI and screenshot output artifacts from the working
+  tree and added ignore rules for `.playwright-cli/` and `output/playwright/`
+  so UI verification evidence does not accidentally become source changes.
+
+Verification:
+
+- `pnpm --filter @prompthub/desktop test -- tests/unit/components/column-resizer.test.tsx --run`: 9 tests passed.
+- `pnpm --filter @prompthub/desktop test -- tests/unit/components/prompt-card-layout.test.tsx tests/unit/components/prompt-drag-utils.test.ts --run`: 6 tests passed.
+- `pnpm --filter @prompthub/desktop typecheck`: passed.
+- `pnpm --filter @prompthub/desktop test -- tests/unit/services/prompt-filter.test.ts --run`: 6 tests passed.
+- `pnpm --filter @prompthub/desktop test -- tests/unit/components/prompt-drag-utils.test.ts --run`: 4 tests passed.
+- `pnpm --filter @prompthub/desktop test -- tests/unit/components/prompt-list-header.test.tsx --run`: 8 tests passed.
+- `pnpm --filter @prompthub/desktop test -- tests/unit/components/top-bar.test.tsx --run`: 24 tests passed.
+- `pnpm --filter @prompthub/desktop test -- tests/unit/components/prompt-copy-utils.test.ts --run`: 11 tests passed.
+
+## 2026-06-26 Prompt Node Creation And Indent Follow-up
+
+- Updated prompt sort labels across all renderer locales so direct child-count
+  sorting is presented as node-count high-to-low / low-to-high sorting.
+- Changed top-bar prompt creation to default new prompts under the currently
+  selected prompt node by setting `parentId` in the create payload. The default
+  applies to manual, quick-add, generated, and image-reverse creation, while an
+  explicit `parentId` from the caller still wins.
+- Preserved create payload fields through the shared `CreatePromptDTO` shape so
+  variables, videos, notes, visibility, order, folder, and parent data are not
+  dropped by the top-bar orchestration.
+- Increased compact prompt-card child indentation from 12px to 16px per depth
+  level and kept parent chips aligned with the deeper title rail.
+
+Verification:
+
+- `pnpm --filter @prompthub/desktop exec vitest run tests/unit/components/prompt-list-header.test.tsx tests/unit/components/prompt-card-layout.test.tsx tests/unit/components/top-bar.test.tsx --run`
+- `pnpm --filter @prompthub/desktop exec vitest run tests/unit/services/prompt-filter.test.ts tests/unit/components/prompt-drag-utils.test.ts tests/unit/components/prompt-table-view.test.tsx tests/unit/components/prompt-list-header.test.tsx tests/unit/components/prompt-card-layout.test.tsx tests/unit/components/top-bar.test.tsx --run`
+- `node -e 'for (const f of ["en","zh","zh-TW","ja","fr","de","es"]) JSON.parse(require("fs").readFileSync("apps/desktop/src/renderer/i18n/locales/"+f+".json","utf8")); console.log("locales ok")'`
+- `pnpm --dir apps/desktop exec eslint src/renderer/components/layout/TopBar.tsx src/renderer/components/layout/MainContent.tsx tests/unit/components/top-bar.test.tsx tests/unit/components/prompt-list-header.test.tsx tests/unit/components/prompt-card-layout.test.tsx --max-warnings 0`
+- `pnpm --filter @prompthub/desktop typecheck`
+- `git diff --check`
+
+## 2026-06-22 Child Count Sorting Follow-up
+
+- Added prompt sort options for direct child count descending and ascending.
+- Kept the child-count definition aligned with card/table hierarchy badges:
+  only direct children visible in the current prompt collection are counted.
+- Made child count the primary key for child-count sorting; pinned prompts only
+  win ties with the same child count.
+- Updated card and table tree flattening to preserve the already-sorted input
+  sibling order for display, while leaving drag move-target calculations on the
+  stored hierarchy order.
+- Updated the sort selector to write sort key and order atomically, avoiding a
+  transient mixed sort state while the app is running.
+- Reset card, table, gallery, and kanban scroll/page position when the sorted
+  prompt order changes so users immediately see the newly selected sort result.
+- Shortened child-count sort labels so the sort menu remains compact.
+
+Verification:
+
+- `pnpm --filter @prompthub/desktop test -- --run tests/unit/services/prompt-filter.test.ts tests/unit/components/prompt-list-header.test.tsx`
+- `pnpm --filter @prompthub/desktop typecheck`
+- `pnpm --filter @prompthub/desktop test -- --run tests/unit/components/skill-quick-install.test.tsx tests/unit/components/prompt-drag-utils.test.ts tests/unit/services/prompt-filter.test.ts tests/unit/components/prompt-list-header.test.tsx`
+- `pnpm --filter @prompthub/desktop typecheck`
+- `git diff --check`
+
 ## 2026-06-15 Follow-up
 
 - Replaced always-visible prompt relationship panels in the inline detail view

@@ -65,13 +65,12 @@ async function fileExists(targetPath: string): Promise<boolean> {
 function sanitizeString(
   value: unknown,
   fallback?: string,
-  maxLength = 10_000,
 ): string | undefined {
   if (typeof value !== "string") {
     return fallback;
   }
 
-  const trimmed = value.trim().slice(0, maxLength);
+  const trimmed = value.trim();
   return trimmed || fallback;
 }
 
@@ -87,13 +86,10 @@ function sanitizeTags(primary: unknown, fallback: unknown): string[] {
       (item): item is string =>
         typeof item === "string" && item.trim().length > 0,
     )
-    .map((item) => item.trim().slice(0, 128));
+    .map((item) => item.trim());
 }
 
-function sanitizeStringList(
-  value: unknown,
-  maxLength = 256,
-): string[] | undefined {
+function sanitizeStringList(value: unknown): string[] | undefined {
   if (!Array.isArray(value)) {
     return undefined;
   }
@@ -103,7 +99,7 @@ function sanitizeStringList(
       (item): item is string =>
         typeof item === "string" && item.trim().length > 0,
     )
-    .map((item) => item.trim().slice(0, maxLength));
+    .map((item) => item.trim());
 
   return items.length > 0 ? items : undefined;
 }
@@ -401,8 +397,8 @@ async function readManifest(skillDir: string): Promise<SkillManifest> {
     return {
       name: sanitizeString(parsed.name),
       description: sanitizeString(parsed.description),
-      version: sanitizeString(parsed.version, undefined, 256),
-      author: sanitizeString(parsed.author, undefined, 256),
+      version: sanitizeString(parsed.version),
+      author: sanitizeString(parsed.author),
       tags: sanitizeTags(parsed.tags, undefined),
       instructions: sanitizeString(parsed.instructions),
     };
@@ -533,14 +529,12 @@ async function installFromSkillContent(
     version:
       sanitizeString(
         parsed?.frontmatter.version,
-        sanitizeString(manifest.version, "1.0.0", 256),
-        256,
+        sanitizeString(manifest.version, "1.0.0"),
       ) || "1.0.0",
     author:
       sanitizeString(
         parsed?.frontmatter.author,
-        sanitizeString(manifest.author, "Local", 256),
-        256,
+        sanitizeString(manifest.author, "Local"),
       ) || "Local",
     tags: [],
     original_tags: sanitizeTags(parsed?.frontmatter.tags, manifest.tags),
@@ -863,20 +857,20 @@ async function importFromJson(
 
   return skillDb.create({
     name: skillName,
-    description: sanitizeString(parsed.description, undefined, 10_000),
-    version: sanitizeString(parsed.version, undefined, 256),
-    author: sanitizeString(parsed.author, undefined, 256),
+    description: sanitizeString(parsed.description),
+    version: sanitizeString(parsed.version),
+    author: sanitizeString(parsed.author),
     instructions: sanitizeString(parsed.instructions),
     content: sanitizeString(parsed.instructions),
     protocol_type: sanitizeProtocolType(parsed.protocol_type),
     tags: sanitizeTags(parsed.tags, ["imported"]),
     is_favorite: false,
-    icon_url: sanitizeString(parsed.icon_url, undefined, 500_000),
-    icon_emoji: sanitizeString(parsed.icon_emoji, undefined, 32),
-    icon_background: sanitizeString(parsed.icon_background, undefined, 64),
+    icon_url: sanitizeString(parsed.icon_url),
+    icon_emoji: sanitizeString(parsed.icon_emoji),
+    icon_background: sanitizeString(parsed.icon_background),
     prerequisites: sanitizeStringList(parsed.prerequisites),
     compatibility: sanitizeStringList(parsed.compatibility),
-    source_url: sanitizeString(parsed.source_url, undefined, 500_000),
+    source_url: sanitizeString(parsed.source_url),
   }).id;
 }
 
@@ -989,6 +983,24 @@ export interface CliSkillService {
     skillMdContent: string,
     platformId: string,
   ): Promise<void>;
+  installSkillToProject(
+    skillDb: SkillDB,
+    skillId: string,
+    options: {
+      projectRoot?: string;
+      targetRootDir?: string;
+      mode?: "copy" | "symlink";
+      ifExists?: "skip" | "overwrite" | "error";
+    },
+  ): Promise<{
+    status: "installed" | "updated" | "skipped";
+    skillId: string;
+    skillName: string;
+    projectRoot: string;
+    targetRootDir: string;
+    skillDir: string;
+    mode: "copy" | "symlink";
+  }>;
   isManagedRepoPath(absolutePath: string): Promise<boolean>;
   listLocalFiles(
     skillDb: SkillDB,
@@ -1408,6 +1420,86 @@ export function createCliSkillService(
     await copyRepoToPlatform(canonicalRepoPath, skillDir);
   }
 
+  async function installSkillToProject(
+    skillDb: SkillDB,
+    skillId: string,
+    options: {
+      projectRoot?: string;
+      targetRootDir?: string;
+      mode?: "copy" | "symlink";
+      ifExists?: "skip" | "overwrite" | "error";
+    },
+  ): Promise<{
+    status: "installed" | "updated" | "skipped";
+    skillId: string;
+    skillName: string;
+    projectRoot: string;
+    targetRootDir: string;
+    skillDir: string;
+    mode: "copy" | "symlink";
+  }> {
+    const skill = await resolveSkill(skillDb, skillId);
+    const repoPath = await resolveRepoPathForSkill(skillDb, skill.id);
+    const projectRoot = path.resolve(options.projectRoot ?? process.cwd());
+    const targetRootDir = path.resolve(
+      options.targetRootDir ?? path.join(projectRoot, ".agents", "skills"),
+    );
+    const skillName = validateSkillName(skill.name);
+    const skillDir = path.join(targetRootDir, skillName);
+    const mode = options.mode ?? "copy";
+    const ifExists = options.ifExists ?? "skip";
+    const canonicalRepoPath = await fs.realpath(repoPath);
+
+    if (
+      canonicalRepoPath === skillDir ||
+      path.resolve(repoPath) === skillDir ||
+      isPathWithin(canonicalRepoPath, targetRootDir) ||
+      isPathWithin(path.resolve(repoPath), targetRootDir)
+    ) {
+      throw new Error(
+        `Target directory must not be the source skill directory or inside it: ${targetRootDir}`,
+      );
+    }
+
+    await fs.mkdir(targetRootDir, { recursive: true });
+    const existed = await fileExists(skillDir);
+    if (existed) {
+      if (ifExists === "skip") {
+        return {
+          status: "skipped",
+          skillId: skill.id,
+          skillName,
+          projectRoot,
+          targetRootDir,
+          skillDir,
+          mode,
+        };
+      }
+      if (ifExists === "error") {
+        throw new Error(
+          `Skill already exists in target directory: ${skillDir}`,
+        );
+      }
+      await fs.rm(skillDir, { recursive: true, force: true });
+    }
+
+    if (mode === "symlink") {
+      await fs.symlink(canonicalRepoPath, skillDir, "dir");
+    } else {
+      await copyRepoToPlatform(canonicalRepoPath, skillDir);
+    }
+
+    return {
+      status: existed ? "updated" : "installed",
+      skillId: skill.id,
+      skillName,
+      projectRoot,
+      targetRootDir,
+      skillDir,
+      mode,
+    };
+  }
+
   async function uninstallSkillMd(
     skillName: string,
     platformId: string,
@@ -1578,6 +1670,7 @@ export function createCliSkillService(
         options,
       ),
     installSkillMd,
+    installSkillToProject,
     isManagedRepoPath,
     listLocalFiles,
     readCurrentFilesSnapshot: createLocalRepoSnapshot,
@@ -1639,14 +1732,12 @@ export function createCliSkillService(
                   ) || "",
                 version: sanitizeString(
                   parsed?.frontmatter.version,
-                  sanitizeString(manifest.version, undefined, 256),
-                  256,
+                  sanitizeString(manifest.version),
                 ),
                 author:
                   sanitizeString(
                     parsed?.frontmatter.author,
-                    sanitizeString(manifest.author, "Local", 256),
-                    256,
+                    sanitizeString(manifest.author, "Local"),
                   ) || "Local",
                 tags: sanitizeTags(parsed?.frontmatter.tags, manifest.tags),
                 instructions,

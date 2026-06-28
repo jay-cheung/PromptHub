@@ -103,6 +103,8 @@ describe("Sidebar", () => {
     useSettingsStore.setState({
       tagsSectionHeight: 140,
       isTagsSectionCollapsed: false,
+      resourceTagsSectionHeight: 140,
+      isResourceTagsSectionCollapsed: false,
       skillTagsSectionHeight: 140,
       isSkillTagsSectionCollapsed: false,
       desktopHomeModules: ["prompt", "skill", "rules"],
@@ -232,7 +234,8 @@ describe("Sidebar", () => {
       marketSources: [],
       targetPresets: [],
       selectedTab: "library",
-      selectedMarketSourceId: "modelcontextprotocol",
+      selectedMarketSourceId: "prompthub-official",
+      filterTags: [],
     } as Partial<ReturnType<typeof useMcpStore.getState>>);
 
     usePluginStore.setState({
@@ -248,6 +251,7 @@ describe("Sidebar", () => {
       targetMatrix: [],
       selectedTab: "market",
       selectedMarketSourceId: "openai-curated",
+      filterTags: [],
       searchQuery: "",
       isLoading: false,
       error: null,
@@ -1064,7 +1068,7 @@ describe("Sidebar", () => {
       marketSources: [
         {
           id: "prompthub-official",
-          displayName: "PromptHub Official Store",
+          displayName: "Official Store",
           repository: "https://github.com/legeling/PromptHub",
           marketplaceFile: ".agents/plugins/marketplace.json",
           trustLevel: "official",
@@ -1095,11 +1099,114 @@ describe("Sidebar", () => {
     expect(within(pluginsStoreButton).queryByText("173")).toBeNull();
     expect(
       screen
-        .getByRole("button", { name: /PromptHub 官方商店/i })
+        .getByRole("button", { name: /^官方商店$/i })
         .compareDocumentPosition(
           screen.getByRole("button", { name: /Codex 官方商店/i }),
         ),
     ).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+  });
+
+  it("renders My Plugin tags in the same bottom sidebar tag area", async () => {
+    useSettingsStore.setState({
+      desktopHomeModules: ["plugin"],
+    } as Partial<ReturnType<typeof useSettingsStore.getState>>);
+    useUIStore.setState({
+      appModule: "plugin",
+      viewMode: "plugin",
+      isSidebarCollapsed: false,
+    });
+    usePluginStore.setState({
+      selectedTab: "library",
+      library: {
+        kind: "prompthub-plugin-library",
+        version: 1,
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        plugins: [
+          {
+            id: "gmail",
+            name: "gmail",
+            displayName: "Gmail",
+            trustLevel: "official",
+            tags: ["automation"],
+            userTags: ["personal"],
+            source: { kind: "market", label: "Codex Plugin Store" },
+            installedAt: 1,
+            updatedAt: 1,
+          },
+        ],
+      },
+    } as Partial<ReturnType<typeof usePluginStore.getState>>);
+
+    await act(async () => {
+      await renderWithI18n(
+        <Sidebar currentPage="home" onNavigate={vi.fn()} />,
+        { language: "en" },
+      );
+    });
+
+    const tagSection = document.querySelector(".sidebar-tag-section");
+    expect(tagSection).not.toBeNull();
+    expect(
+      within(tagSection as HTMLElement).getByRole("button", {
+        name: "automation",
+      }),
+    ).toBeInTheDocument();
+
+    fireEvent.click(
+      within(tagSection as HTMLElement).getByRole("button", {
+        name: "personal",
+      }),
+    );
+    expect(usePluginStore.getState().filterTags).toEqual(["personal"]);
+  });
+
+  it("renders My MCP tags in the same bottom sidebar tag area", async () => {
+    useSettingsStore.setState({
+      desktopHomeModules: ["mcp"],
+    } as Partial<ReturnType<typeof useSettingsStore.getState>>);
+    useUIStore.setState({
+      appModule: "mcp",
+      viewMode: "mcp",
+      isSidebarCollapsed: false,
+    });
+    useMcpStore.setState({
+      selectedTab: "library",
+      library: {
+        kind: "prompthub-mcp-library",
+        version: 1,
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        bindings: [],
+        servers: [
+          {
+            id: "fetch",
+            name: "fetch",
+            displayName: "Fetch",
+            transport: "stdio",
+            command: "uvx",
+            enabled: true,
+            tags: ["web"],
+            source: { type: "market", id: "fetch", label: "Official Store" },
+            createdAt: 1,
+            updatedAt: 1,
+          },
+        ],
+      },
+    } as Partial<ReturnType<typeof useMcpStore.getState>>);
+
+    await act(async () => {
+      await renderWithI18n(
+        <Sidebar currentPage="home" onNavigate={vi.fn()} />,
+        { language: "en" },
+      );
+    });
+
+    const tagSection = document.querySelector(".sidebar-tag-section");
+    expect(tagSection).not.toBeNull();
+    fireEvent.click(
+      within(tagSection as HTMLElement).getByRole("button", { name: "web" }),
+    );
+
+    expect(useMcpStore.getState().filterTags).toEqual(["web"]);
   });
 
   it("keeps Rules visible but hides project-directory actions in web runtime", async () => {
@@ -1383,8 +1490,8 @@ describe("Sidebar", () => {
           transport: "stdio",
           tags: ["code"],
           source: {
-            id: "modelcontextprotocol",
-            label: "Official MCP Registry",
+            id: "prompthub-official",
+            label: "Official Store",
           },
         },
         {
@@ -1402,9 +1509,9 @@ describe("Sidebar", () => {
       ],
       marketSources: [
         {
-          id: "modelcontextprotocol",
-          label: "Official MCP Registry",
-          url: "https://registry.modelcontextprotocol.io",
+          id: "prompthub-official",
+          label: "Official Store",
+          url: "https://github.com/legeling/PromptHub",
           trustLevel: "official",
         },
         {
@@ -1418,6 +1525,18 @@ describe("Sidebar", () => {
       selectedTab: "library",
       selectedMarketSourceId: "all",
     } as Partial<ReturnType<typeof useMcpStore.getState>>);
+    useSettingsStore.setState({
+      skillProjects: [
+        {
+          id: "project-1",
+          name: "Project One",
+          rootPath: "/workspace/project-one",
+          scanPaths: [],
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      ],
+    } as Partial<ReturnType<typeof useSettingsStore.getState>>);
 
     await act(async () => {
       await renderWithI18n(
@@ -1426,8 +1545,8 @@ describe("Sidebar", () => {
       );
     });
 
-    const labels = ["My MCP", "Agent MCP", "MCP Store"].map((label) =>
-      screen.getByRole("button", { name: label }),
+    const labels = ["My MCP", "Agent MCP", "Project MCP", "MCP Store"].map(
+      (label) => screen.getByRole("button", { name: label }),
     );
 
     expect(labels[0].compareDocumentPosition(labels[1])).toBe(
@@ -1436,45 +1555,110 @@ describe("Sidebar", () => {
     expect(labels[1].compareDocumentPosition(labels[2])).toBe(
       Node.DOCUMENT_POSITION_FOLLOWING,
     );
+    expect(labels[2].compareDocumentPosition(labels[3])).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
     expect(screen.queryByTestId("mcp-store-source-scroll")).toBeNull();
 
     fireEvent.click(labels[1]);
     expect(useMcpStore.getState().selectedTab).toBe("targets");
 
     fireEvent.click(labels[2]);
+    expect(useMcpStore.getState().selectedTab).toBe("projects");
+
+    fireEvent.click(labels[3]);
     expect(useMcpStore.getState().selectedTab).toBe("market");
     expect(useMcpStore.getState().selectedMarketSourceId).toBe(
-      "modelcontextprotocol",
+      "prompthub-official",
     );
-    expect(within(labels[2]).queryByText("2")).not.toBeInTheDocument();
+    expect(within(labels[3]).queryByText("2")).not.toBeInTheDocument();
     const sourceScroll = screen.getByTestId("mcp-store-source-scroll");
     expect(
       within(sourceScroll).queryByRole("button", { name: /All Sources/ }),
     ).not.toBeInTheDocument();
     expect(
       within(sourceScroll).getByRole("button", {
-        name: /Official MCP Registry\s*1/,
+        name: /Official Store\s*1/,
       }),
     ).toBeInTheDocument();
     const curatedButton = within(sourceScroll).getByRole("button", {
-      name: /Smithery\s*1/,
+      name: /^Smithery$/,
     });
     expect(curatedButton).toBeInTheDocument();
+    expect(within(curatedButton).queryByText("1")).not.toBeInTheDocument();
     expect(
       within(sourceScroll).queryByRole("button", { name: /Postman/ }),
     ).not.toBeInTheDocument();
 
     fireEvent.click(curatedButton);
     expect(useMcpStore.getState().selectedTab).toBe("market");
-    expect(useMcpStore.getState().selectedMarketSourceId).toBe(
-      "smithery",
-    );
+    expect(useMcpStore.getState().selectedMarketSourceId).toBe("smithery");
 
-    fireEvent.click(labels[2]);
+    fireEvent.click(labels[3]);
     expect(screen.queryByTestId("mcp-store-source-scroll")).toBeNull();
 
-    fireEvent.click(labels[2]);
+    fireEvent.click(labels[3]);
     expect(screen.getByTestId("mcp-store-source-scroll")).toBeInTheDocument();
+  });
+
+  it("shows lower-bound total counts for paginated MCP store channels", async () => {
+    useSettingsStore.setState({
+      desktopHomeModules: ["mcp"],
+    } as Partial<ReturnType<typeof useSettingsStore.getState>>);
+    useUIStore.setState({
+      appModule: "mcp",
+      viewMode: "prompt",
+      isSidebarCollapsed: false,
+    });
+    useUIStore.getState().setSidebarCollapsed(false);
+    useMcpStore.setState({
+      library: {
+        kind: "prompthub-mcp-library",
+        version: 1,
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        servers: [],
+        bindings: [],
+      },
+      marketTemplates: [],
+      marketSources: [
+        {
+          id: "modelcontextprotocol",
+          label: "MCP Registry",
+          url: "https://registry.modelcontextprotocol.io",
+          trustLevel: "official",
+        },
+      ],
+      remoteMarketEntries: {
+        "modelcontextprotocol:": {
+          sourceId: "modelcontextprotocol",
+          templates: [],
+          totalCount: 30,
+          totalCountIsLowerBound: true,
+          nextCursor: "cursor-2",
+          loadedAt: Date.now(),
+          loading: false,
+          error: null,
+          query: "",
+        },
+      },
+      targetPresets: [],
+      selectedTab: "market",
+      selectedMarketSourceId: "modelcontextprotocol",
+    } as Partial<ReturnType<typeof useMcpStore.getState>>);
+
+    await act(async () => {
+      await renderWithI18n(
+        <Sidebar currentPage="home" onNavigate={vi.fn()} layout="panel" />,
+        { language: "en" },
+      );
+    });
+
+    const sourceScroll = screen.getByTestId("mcp-store-source-scroll");
+    expect(
+      within(sourceScroll).getByRole("button", {
+        name: /MCP Registry\s*30\+/,
+      }),
+    ).toBeInTheDocument();
   });
 
   it("hides disabled home modules from the rail", async () => {
