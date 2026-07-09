@@ -42,8 +42,24 @@ describe("mcp target presets", () => {
         target: "kilo",
         scope: "workspace",
         label: "Docs / Kilo Code",
-        path: "/workspace/docs/kilo.jsonc",
+        path: "/workspace/docs/kilo.json",
         platformId: "kilo",
+      },
+      {
+        id: "project:project_docs:workbuddy",
+        target: "workbuddy",
+        scope: "workspace",
+        label: "Docs / Tencent WorkBuddy",
+        path: "/workspace/docs/.workbuddy/mcp.json",
+        platformId: "workbuddy",
+      },
+      {
+        id: "project:project_docs:codebuddy",
+        target: "codebuddy",
+        scope: "workspace",
+        label: "Docs / CodeBuddy",
+        path: "/workspace/docs/.mcp.json",
+        platformId: "codebuddy",
       },
     ]);
   });
@@ -71,7 +87,7 @@ describe("mcp target presets", () => {
         target: "kilo",
         scope: "global",
         label: "Kilo Code",
-        path: "/Users/test/.config/kilo/kilo.jsonc",
+        path: "/Users/test/.config/kilo/kilo.json",
         platformId: "kilo",
       },
       {

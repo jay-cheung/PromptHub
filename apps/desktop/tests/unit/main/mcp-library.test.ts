@@ -1190,7 +1190,7 @@ describe("CoreMcpLibraryService", () => {
       '[mcp_servers.filesystem]\ncommand = "npx"\n',
       "utf8",
     );
-    const kiloPath = path.join(userDataPath, "status", "kilo.jsonc");
+    const kiloPath = path.join(userDataPath, "status", "kilo.json");
     fs.writeFileSync(
       kiloPath,
       [
@@ -1315,7 +1315,7 @@ describe("CoreMcpLibraryService", () => {
     expect(byId.opencode.path).toBe(
       "/Users/test/.config/opencode/opencode.json",
     );
-    expect(byId.kilo.path).toBe("/Users/test/.config/kilo/kilo.jsonc");
+    expect(byId.kilo.path).toBe("/Users/test/.config/kilo/kilo.json");
     expect(presets.filter((preset) => preset.platformId === "kilo")).toEqual([
       byId.kilo,
     ]);
@@ -1326,6 +1326,8 @@ describe("CoreMcpLibraryService", () => {
     expect(byId.cline.path).toBe(
       "/Users/test/.cline/data/settings/cline_mcp_settings.json",
     );
+    expect(byId.workbuddy.path).toBe("/Users/test/.workbuddy/mcp.json");
+    expect(byId.codebuddy.path).toBe("/Users/test/.codebuddy/.mcp.json");
     expect(byId["claude-desktop"].path).toBe(
       "/Users/test/Library/Application Support/Claude/claude_desktop_config.json",
     );

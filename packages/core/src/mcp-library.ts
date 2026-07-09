@@ -170,7 +170,7 @@ export function getMcpTargetPresets(
       target: "kilo",
       scope: "global",
       label: "Kilo Code",
-      path: path.join(homeDir, ".config", "kilo", "kilo.jsonc"),
+      path: path.join(homeDir, ".config", "kilo", "kilo.json"),
       platformId: "kilo",
     },
     {
@@ -226,6 +226,22 @@ export function getMcpTargetPresets(
         "cline_mcp_settings.json",
       ),
       platformId: "cline",
+    },
+    {
+      id: "workbuddy",
+      target: "workbuddy",
+      scope: "global",
+      label: "Tencent WorkBuddy",
+      path: path.join(homeDir, ".workbuddy", "mcp.json"),
+      platformId: "workbuddy",
+    },
+    {
+      id: "codebuddy",
+      target: "codebuddy",
+      scope: "global",
+      label: "CodeBuddy",
+      path: path.join(homeDir, ".codebuddy", ".mcp.json"),
+      platformId: "codebuddy",
     },
   ];
 }
