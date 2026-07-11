@@ -2,7 +2,7 @@
 
 `spec/issues/` 用于存放 PromptHub 内部 SSD 视角下的问题跟踪，而不是对外 issue 模板或零散聊天记录。
 
-在最新 `spec-init` 拓扑中，这一层属于 `records.issues`。
+在锁定的 `spec-init` 基线（`f83def1`）中，这一层属于 `records.issues`。
 
 ## Structure
 
@@ -14,7 +14,14 @@
 - `active/quality.md`：内部质量与工具链问题跟踪。
 - `active/github-open.md`：当前 `legeling/PromptHub` 仓库 open issues 快照。
 - `active/local-github-status.md`：本地 triage / delivery 状态覆盖层，用于记录已实现但尚未发布的问题。
+- `active/ISS-20260710-001-spec-governance-debt.md`：spec-init 对齐后发现的 active-change、生命周期和索引治理欠账。
 - `archive/github-closed.md`：当前 `legeling/PromptHub` 仓库 closed issues 快照。
+
+## Internal Record Index
+
+| ID                 | Title                | Status | Path                                                          | Related change/issue                      | Updated    |
+| ------------------ | -------------------- | ------ | ------------------------------------------------------------- | ----------------------------------------- | ---------- |
+| `ISS-20260710-001` | Spec Governance Debt | open   | `spec/issues/active/ISS-20260710-001-spec-governance-debt.md` | `2026-07-10-spec-init-upstream-alignment` | 2026-07-10 |
 
 ## GitHub vs Local State
 
@@ -29,8 +36,8 @@ This prevents the project from closing user-reported issues before users can dow
 
 ## Sync Note
 
-- 当前 GitHub issue 清单通过 GitHub REST API 手工同步到仓库。
-- 本轮同步时间：`2026-06-24`。
+- 当前 GitHub issue 清单通过 GitHub CLI 手工同步到仓库。
+- 本轮同步时间：`2026-07-09`。
 - 如果 GitHub issue 状态发生明显变化，或某个 active change 依赖 issue 上下文，应优先刷新这里的快照。
 - 如果只是本地实现状态变化，更新 `active/local-github-status.md`，不要手改 GitHub 快照文件。
 

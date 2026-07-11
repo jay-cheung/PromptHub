@@ -22,11 +22,15 @@ import geminiIcon from "../../assets/platforms/gemini.png";
 import antigravityIcon from "../../assets/platforms/antigravity.svg";
 import clineIcon from "../../assets/platforms/cline.svg";
 import traeIcon from "../../assets/platforms/trae.png";
+import workbuddyIcon from "../../assets/platforms/workbuddy.svg";
 import opencodeIcon from "../../assets/platforms/opencode.png";
 import codexIcon from "../../assets/platforms/codex.png";
+import grokLightIcon from "../../assets/platforms/grok-light.svg";
+import grokDarkIcon from "../../assets/platforms/grok-dark.svg";
 import kiloLightIcon from "../../assets/platforms/kilo-light.svg";
 import kiloDarkIcon from "../../assets/platforms/kilo-dark.svg";
 import openclawIcon from "../../assets/platforms/openclaw.png";
+import qclawIcon from "../../assets/platforms/qclaw.png";
 import qoderIcon from "../../assets/platforms/qoder.png";
 import qoderworkIcon from "../../assets/platforms/qoderwork.png";
 import codebuddyLightIcon from "../../assets/platforms/codebuddy-light.svg";
@@ -51,14 +55,19 @@ const PLATFORM_ICONS: Record<string, PlatformIconSource> = {
   "trae-work": traeIcon,
   "trae-cn": traeIcon,
   "trae-work-cn": traeIcon,
+  workbuddy: workbuddyIcon,
   opencode: opencodeIcon,
   codex: codexIcon,
+  grok: {
+    light: grokLightIcon,
+    dark: grokDarkIcon,
+  },
   kilo: {
     light: kiloLightIcon,
     dark: kiloDarkIcon,
   },
   openclaw: openclawIcon,
-  qclaw: openclawIcon,
+  qclaw: qclawIcon,
   qoder: qoderIcon,
   qoderwork: qoderworkIcon,
   "cherry-studio": cherryStudioIcon,
@@ -86,6 +95,7 @@ const FALLBACK_ICONS: Record<string, React.ReactNode> = {
   opencode: <TerminalIcon />,
   cline: <TerminalIcon />,
   codex: <TerminalIcon />,
+  grok: <TerminalIcon />,
   kilo: <BotIcon />,
   amp: <ZapIcon />,
   openclaw: <BugIcon />,

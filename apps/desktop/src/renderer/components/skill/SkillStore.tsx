@@ -1308,7 +1308,8 @@ export function SkillStore() {
   const shouldShowStoreSearch =
     sourceMeta.showCatalog &&
     (selectedStoreSourceId === "community" ||
-      selectedStoreSourceId === "clawhub");
+      selectedStoreSourceId === "clawhub" ||
+      Boolean(selectedCustomSource));
   const canLoadNextStorePage = Boolean(visibleRemoteEntry?.nextCursor);
   const isLoadingMoreSelectedSource =
     loadingMoreSourceId === selectedStoreSourceId;
@@ -1351,7 +1352,7 @@ export function SkillStore() {
     Boolean(selectedCustomSource) &&
     !shouldShowInitialLoading &&
     !currentRemoteError &&
-    sourceRegistrySkills.length === 0;
+    selectedStoreLoadedCount === 0;
   const isRefreshingCachedSource =
     isSelectedSourceRemote &&
     loadingSourceId === selectedStoreSourceId &&

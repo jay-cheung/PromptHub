@@ -21,6 +21,7 @@ export interface SkillPlatform {
   globalRuleFile?: string;
   configFiles?: string[];
   isCustom?: boolean;
+  isConfigured?: boolean;
 }
 
 export type SkillPlatformOsKey = "darwin" | "win32" | "linux";
@@ -130,6 +131,7 @@ export const DEFAULT_SKILL_PLATFORM_ORDER = [
   "opencode",
   "cline",
   "cursor",
+  "grok",
   "cherry-studio",
   "windsurf",
   "kiro",
@@ -340,6 +342,27 @@ export const SKILL_PLATFORMS: SkillPlatform[] = [
     pluginsRelativePath: "plugins/cache/prompthub",
     globalRuleFile: "AGENTS.md",
     configFiles: ["config.toml"],
+  },
+  {
+    id: "grok",
+    name: "Grok Build",
+    icon: "Terminal",
+    rootDir: {
+      darwin: "~/.grok",
+      win32: "%USERPROFILE%\\.grok",
+      linux: "~/.grok",
+    },
+    skillsRelativePath: "skills",
+    mcpRelativePath: "config.toml",
+    pluginsRelativePath: "plugins",
+    globalRuleFile: "AGENTS.md",
+    configFiles: [
+      "config.toml",
+      "pager.toml",
+      "settings.json",
+      "lsp.json",
+      "sandbox.toml",
+    ],
   },
   {
     id: "kilo",

@@ -56,7 +56,9 @@ PromptHub 对 Plugin 的长期行为约束是：
 ## 主要映射来源
 
 - `spec/knowledge/context/system.md`
+- `spec/knowledge/behavior/database-concurrency.md`
 - `spec/knowledge/behavior/skills.md`
 - `spec/knowledge/behavior/plugins.md`
+- `spec/knowledge/behavior/mobile.md`
 - `spec/knowledge/behavior/sync.md`
 - `spec/knowledge/behavior/rules-workspace.md`

@@ -100,19 +100,66 @@ jobs:
         shell: bash
         working-directory: apps/desktop
         run: |
+          if [ "${{ matrix.platform }}" = "mac" ]; then
+            missing=false
+            for secret_name in MAC_CSC_LINK MAC_CSC_KEY_PASSWORD APPLE_TEAM_ID; do
+              if [ -z "${!secret_name:-}" ]; then
+                echo "::error::${secret_name} is required for signed and notarized macOS releases."
+                missing=true
+              fi
+            done
+
+            has_api_key=false
+            if [ -n "${APPLE_API_KEY_B64:-}" ] && [ -n "${APPLE_API_KEY_ID:-}" ] && [ -n "${APPLE_API_ISSUER:-}" ]; then
+              has_api_key=true
+            fi
+
+            has_apple_id=false
+            if [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_APP_SPECIFIC_PASSWORD:-}" ]; then
+              has_apple_id=true
+            fi
+
+            if [ "$has_api_key" != "true" ] && [ "$has_apple_id" != "true" ]; then
+              echo "::error::macOS notarization requires either APPLE_API_KEY + APPLE_API_KEY_ID + APPLE_API_ISSUER, or APPLE_ID + APPLE_APP_SPECIFIC_PASSWORD."
+              missing=true
+            fi
+
+            if [ "$missing" = "true" ]; then
+              exit 1
+            fi
+
+            export CSC_LINK="$MAC_CSC_LINK"
+            export CSC_KEY_PASSWORD="$MAC_CSC_KEY_PASSWORD"
+
+            if [ "$has_api_key" = "true" ]; then
+              APPLE_API_KEY_PATH="${RUNNER_TEMP}/AuthKey_${APPLE_API_KEY_ID}.p8"
+              node -e 'const fs = require("fs"); const outputPath = process.argv[1]; const encodedKey = process.env.APPLE_API_KEY_B64 || ""; const keyContent = Buffer.from(encodedKey, "base64").toString("utf8").trim(); if (!keyContent.includes("-----BEGIN PRIVATE KEY-----")) { console.error("APPLE_API_KEY must be the base64-encoded contents of an AuthKey_<KEY_ID>.p8 file."); process.exit(1); } fs.writeFileSync(outputPath, `${keyContent}\n`, { mode: 0o600 });' "$APPLE_API_KEY_PATH"
+              chmod 600 "$APPLE_API_KEY_PATH"
+              export APPLE_API_KEY="$APPLE_API_KEY_PATH"
+            fi
+          fi
+
           if [ -n "${{ matrix.arch }}" ]; then
             # Build specific architecture (Windows or macOS with arch specified)
             # 构建特定架构（Windows 或指定了 arch 的 macOS）
             if [ "${{ matrix.platform }}" = "win" ]; then
-              pnpm vite build && pnpm electron-builder --win --${{ matrix.arch }} --publish never
+              pnpm vite build && pnpm electron-builder --config electron-builder.config.cjs --win --${{ matrix.arch }} --publish never
             elif [ "${{ matrix.platform }}" = "mac" ]; then
-              pnpm vite build && pnpm electron-builder --mac --${{ matrix.arch }} --publish never
+              pnpm vite build && PROMPTHUB_MAC_RELEASE_SIGN=true pnpm electron-builder --config electron-builder.config.cjs --mac --${{ matrix.arch }} --publish never
             fi
           else
             pnpm electron:build:${{ matrix.platform }}
           fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MAC_CSC_LINK: ${{ matrix.platform == 'mac' && secrets.MAC_CSC_LINK || '' }}
+          MAC_CSC_KEY_PASSWORD: ${{ matrix.platform == 'mac' && secrets.MAC_CSC_KEY_PASSWORD || '' }}
+          APPLE_API_KEY_B64: ${{ matrix.platform == 'mac' && secrets.APPLE_API_KEY || '' }}
+          APPLE_API_KEY_ID: ${{ matrix.platform == 'mac' && secrets.APPLE_API_KEY_ID || '' }}
+          APPLE_API_ISSUER: ${{ matrix.platform == 'mac' && secrets.APPLE_API_ISSUER || '' }}
+          APPLE_ID: ${{ matrix.platform == 'mac' && secrets.APPLE_ID || '' }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ matrix.platform == 'mac' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ matrix.platform == 'mac' && secrets.APPLE_TEAM_ID || '' }}
 
       - name: Verify macOS app architecture
         if: matrix.platform == 'mac' && matrix.arch != ''
@@ -143,6 +190,73 @@ jobs:
             echo "Expected arm64 binary, got: $ACTUAL_ARCHS"
             exit 1
           fi
+
+      - name: Verify macOS signing and notarization
+        if: matrix.platform == 'mac' && matrix.arch != ''
+        shell: bash
+        working-directory: apps/desktop
+        run: |
+          validate_macos_app() {
+            local app_path="$1"
+
+            codesign --verify --deep --strict --verbose=2 "$app_path"
+
+            local codesign_info
+            codesign_info=$(codesign -dv --verbose=2 "$app_path" 2>&1)
+            echo "$codesign_info"
+            echo "$codesign_info" | grep -q "Authority=Developer ID Application:"
+
+            xcrun stapler validate "$app_path"
+
+            local spctl_out
+            spctl_out=$(spctl --assess --verbose --type exec "$app_path" 2>&1)
+            echo "$spctl_out"
+            echo "$spctl_out" | grep -q "accepted"
+            echo "$spctl_out" | grep -q "source=Notarized Developer ID"
+          }
+
+          cleanup() {
+            if [ -n "${DMG_MOUNT_DIR:-}" ] && mount | grep -q "$DMG_MOUNT_DIR"; then
+              hdiutil detach "$DMG_MOUNT_DIR" -quiet || true
+            fi
+            rm -rf "${TMP_DIR:-}" "${DMG_MOUNT_DIR:-}"
+          }
+          trap cleanup EXIT
+
+          ZIP_FILE=$(find dist -maxdepth 1 -name "PromptHub-*-${{ matrix.arch }}.zip" | head -n 1)
+          if [ -z "$ZIP_FILE" ]; then
+            echo "Expected macOS ZIP artifact not found for ${{ matrix.arch }}"
+            exit 1
+          fi
+
+          TMP_DIR=$(mktemp -d)
+          ditto -x -k "$ZIP_FILE" "$TMP_DIR/app"
+          APP_PATH=$(find "$TMP_DIR/app" -maxdepth 4 -type d -name "PromptHub.app" | head -n 1)
+          if [ -z "$APP_PATH" ]; then
+            echo "PromptHub.app not found inside $ZIP_FILE"
+            exit 1
+          fi
+
+          echo "Verifying ZIP app: $APP_PATH"
+          validate_macos_app "$APP_PATH"
+
+          DMG_FILE=$(find dist -maxdepth 1 -name "PromptHub-*-${{ matrix.arch }}.dmg" | head -n 1)
+          if [ -z "$DMG_FILE" ]; then
+            echo "Expected macOS DMG artifact not found for ${{ matrix.arch }}"
+            exit 1
+          fi
+
+          DMG_MOUNT_DIR=$(mktemp -d)
+          hdiutil attach "$DMG_FILE" -mountpoint "$DMG_MOUNT_DIR" -nobrowse -quiet
+
+          DMG_APP_PATH=$(find "$DMG_MOUNT_DIR" -maxdepth 2 -type d -name "PromptHub.app" | head -n 1)
+          if [ -z "$DMG_APP_PATH" ]; then
+            echo "PromptHub.app not found inside $DMG_FILE"
+            exit 1
+          fi
+
+          echo "Verifying DMG app: $DMG_APP_PATH"
+          validate_macos_app "$DMG_APP_PATH"
 
       # NSIS installer executables expose the bootstrap PE header instead of the packaged app
       # architecture, so installer-level PE checks report false mismatches on Windows builds.
@@ -372,11 +486,8 @@ jobs:
           | Linux | [![Linux AppImage](https://img.shields.io/badge/Linux_AppImage-FCC624?style=for-the-badge&logo=linux&logoColor=black)](${DOWNLOAD_BASE_URL}/PromptHub-${VERSION}-x64.AppImage) [![Linux deb](https://img.shields.io/badge/Linux_deb-FCC624?style=for-the-badge&logo=linux&logoColor=black)](${DOWNLOAD_BASE_URL}/PromptHub-${VERSION}-amd64.deb) |
           | 预览版 | [![Preview Prereleases](https://img.shields.io/badge/Preview_Prereleases-8B5CF6?style=for-the-badge&logo=github&logoColor=white)](${PREVIEW_RELEASE_URL}) |
 
-          ### ⚠️ macOS 首次启动
-          如果提示"无法打开"或"已损坏"，请在终端执行：
-          \`\`\`bash
-          sudo xattr -rd com.apple.quarantine /Applications/PromptHub.app
-          \`\`\`
+          ### macOS 安全说明
+          macOS 安装包已使用 Developer ID 签名并完成 Apple 公证。请优先从本 Release 或官网镜像下载；如果系统仍提示无法验证，请重新下载当前 Release 中的 DMG。
 
           ${PREVIEW_NOTE}
 

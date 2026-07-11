@@ -367,9 +367,55 @@ export function importChildMcpServersForPlugin(
   return result;
 }
 
-function countDirectoryEntries(dirPath: string): number {
+function getContainedPath(
+  packageDir: string,
+  candidatePath: string,
+): string | null {
+  const realPackageDir = safeRealPath(packageDir);
+  const realCandidatePath = safeRealPath(candidatePath);
+  if (
+    !realPackageDir ||
+    !realCandidatePath ||
+    !isInsideOrEqualDirectory(realPackageDir, realCandidatePath)
+  ) {
+    return null;
+  }
+  return realCandidatePath;
+}
+
+function getContainedDirectoryPath(
+  packageDir: string,
+  dirName: string,
+): string | null {
   try {
-    if (!fs.statSync(dirPath).isDirectory()) return 0;
+    const dirPath = getContainedPath(packageDir, path.join(packageDir, dirName));
+    return dirPath && fs.statSync(dirPath).isDirectory() ? dirPath : null;
+  } catch {
+    return null;
+  }
+}
+
+function getContainedFilePath(
+  packageDir: string,
+  filePath: string,
+): string | null {
+  try {
+    const containedPath = getContainedPath(packageDir, filePath);
+    return containedPath && fs.statSync(containedPath).isFile()
+      ? containedPath
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function countContainedDirectoryEntries(
+  packageDir: string,
+  dirName: string,
+): number {
+  const dirPath = getContainedDirectoryPath(packageDir, dirName);
+  if (!dirPath) return 0;
+  try {
     return fs
       .readdirSync(dirPath, { withFileTypes: true })
       .filter((entry) => !entry.name.startsWith(".")).length;
@@ -391,7 +437,8 @@ function getPackageMarkerPath(
 ): string | null {
   for (const markerPath of markerPaths) {
     const candidatePath = path.join(packageDir, ...markerPath.split("/"));
-    if (fs.existsSync(candidatePath)) return candidatePath;
+    const containedMarkerPath = getContainedFilePath(packageDir, candidatePath);
+    if (containedMarkerPath) return candidatePath;
   }
   return null;
 }
@@ -401,10 +448,23 @@ function looksLikeManualPluginPackage(
   markerPaths: string[],
 ): boolean {
   if (getPackageMarkerPath(packageDir, markerPaths)) return true;
-  if (!fs.existsSync(path.join(packageDir, "package.json"))) return false;
-  return PLUGIN_DIR_INVENTORY.some(({ dirs }) =>
-    dirs.some((dirName) => fs.existsSync(path.join(packageDir, dirName))),
+  const hasRecognizedCapability = PLUGIN_DIR_INVENTORY.some(({ dirs }) =>
+    dirs.some(
+      (dirName) => getContainedDirectoryPath(packageDir, dirName) !== null,
+    ),
   );
+  if (
+    getContainedFilePath(packageDir, path.join(packageDir, "package.json"))
+  ) {
+    return hasRecognizedCapability;
+  }
+
+  const populatedCapabilityKinds = PLUGIN_DIR_INVENTORY.filter(({ dirs }) =>
+    dirs.some(
+      (dirName) => countContainedDirectoryEntries(packageDir, dirName) > 0,
+    ),
+  ).length;
+  return populatedCapabilityKinds >= 2;
 }
 
 function getPluginInventory(
@@ -426,13 +486,13 @@ function getPluginInventory(
   for (const { key, dirs } of PLUGIN_DIR_INVENTORY) {
     const count = dirs.reduce(
       (sum, dirName) =>
-        sum + countDirectoryEntries(path.join(packageDir, dirName)),
+        sum + countContainedDirectoryEntries(packageDir, dirName),
       0,
     );
     inventory[key] = Math.max(inventory[key], count);
   }
 
-  if (fs.existsSync(path.join(packageDir, ".mcp.json"))) {
+  if (getContainedFilePath(packageDir, path.join(packageDir, ".mcp.json"))) {
     inventory.mcpServers = Math.max(inventory.mcpServers, 1);
   }
   if (markerPath && path.basename(markerPath) === "POWER.md") {

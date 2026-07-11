@@ -43,6 +43,26 @@
 - GitHub 可发现的贡献入口文件必须存在，并指向当前有效的 canonical 贡献指南。
 - 贡献指南中的开发命令、monorepo 目录结构与 SSD 工作流说明必须与当前仓库实际状态一致。
 
+### 8. macOS Developer ID Signing
+
+- macOS desktop release artifacts must be built with Hardened Runtime enabled and notarized by Apple before publication.
+- Direct-install macOS in-app updates must publish the signed and notarized ZIP
+  payload plus matching `latest-mac*.yml` metadata; the DMG remains the
+  first-install distribution artifact.
+- GitHub Actions macOS jobs must require Developer ID Application signing credentials and App Store Connect notarization credentials before packaging.
+- macOS signing credentials must be scoped to macOS jobs and must not be exported as generic signing variables for Windows or Linux builds.
+- Release verification must check the packaged macOS app with `codesign`, `xcrun stapler validate`, and `spctl`.
+
+### 9. Release Procedure Entry
+
+- The reusable execution procedure lives only at
+  `.agents/skills/release-sync/SKILL.md`.
+- The skill must defer policy to this stable release spec and current
+  repository commands; it must not be copied into `.agents/rules/` or
+  `.agents/workflows/`.
+- Release-impacting local changes use `pnpm verify:release:quick`; tagging or
+  publishing a release candidate requires the full `pnpm verify:release` gate.
+
 ## Stable Scenarios
 
 ### Scenario: Contributor prepares a release-impacting change
@@ -94,3 +114,12 @@ When a contributor looks for contribution instructions via the repository UI:
 
 - GitHub should surface a root contribution entry file
 - that entry file should route them to the canonical guide with current monorepo and SSD instructions
+
+### Scenario: Maintainer publishes macOS desktop artifacts
+
+When a tag release builds macOS DMG and ZIP artifacts:
+
+- the workflow requires Developer ID and notarization secrets before packaging
+- the packaged app passes signature, stapling, and Gatekeeper assessment checks
+- the release includes matching ZIP metadata for direct-install in-app updates
+- public install notes present the notarized artifact as the normal install path

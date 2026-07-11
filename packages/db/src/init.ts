@@ -2,6 +2,10 @@ import Database from "./adapter";
 import path from "path";
 import fs from "fs";
 import { SCHEMA_TABLES, SCHEMA_INDEXES } from "./schema";
+import {
+  acquireDatabaseClientLease,
+  type DatabaseClientLease,
+} from "./database-client-lock";
 
 /** Column metadata returned by `PRAGMA table_info(...)`. */
 interface PragmaColumnInfo {
@@ -34,9 +38,28 @@ export interface InitDatabaseHooks {
     name: string;
     source_url: string | null;
   }) => string | null;
+  /**
+   * Recover a legacy lock without lease metadata. Only hosts with an external
+   * single-instance guarantee may enable this; shared callers default to false.
+   */
+  recoverUnregisteredLock?: boolean;
 }
 
 let db: Database.Database | null = null;
+let dbClientLease: DatabaseClientLease | null = null;
+
+function resetFailedDatabaseInitialization(): void {
+  const failedDatabase = db;
+  db = null;
+  try {
+    failedDatabase?.close();
+  } catch (error) {
+    console.warn("[DB] Failed to close an incomplete database:", error);
+  } finally {
+    dbClientLease?.release();
+    dbClientLease = null;
+  }
+}
 
 const REQUIRED_MIGRATION_NAMES = [
   "backfill_local_repo_path_v1",
@@ -44,6 +67,7 @@ const REQUIRED_MIGRATION_NAMES = [
   "server_auth_tables_v1",
   "drop_skill_name_unique_v2",
   "fix_prompt_current_version_v1",
+  "backfill_skill_legacy_fingerprint_algorithm_v1",
 ] as const;
 
 const REQUIRED_TABLES = [
@@ -90,6 +114,11 @@ const REQUIRED_COLUMNS: Record<string, string[]> = {
     "registry_slug",
     "content_url",
     "installed_content_hash",
+    "installed_directory_fingerprint",
+    "fingerprint_algorithm",
+    "source_last_checked_at",
+    "source_last_error",
+    "source_binding_state",
     "installed_version",
     "installed_at",
     "updated_from_store_at",
@@ -109,27 +138,6 @@ const REQUIRED_COLUMNS: Record<string, string[]> = {
   users: ["role"],
   prompt_versions: ["system_prompt_en", "user_prompt_en", "ai_response"],
 };
-
-/**
- * node-sqlite3-wasm uses a directory lock `<dbfile>.lock`.
- * If the previous run crashed, the lock directory may remain and cause
- * "database is locked" on the next startup. Proactively clean it up.
- */
-function clearStaleLock(dbPath: string): void {
-  const lockDir = `${dbPath}.lock`;
-  try {
-    if (!fs.existsSync(lockDir)) {
-      return;
-    }
-    fs.rmSync(lockDir, { recursive: true, force: true });
-    console.log(`[DB] Cleared stale lock: ${lockDir}`);
-  } catch (err: unknown) {
-    const code = (err as NodeJS.ErrnoException).code;
-    if (code !== "ENOENT") {
-      console.warn(`[DB] Failed to clear stale lock (${lockDir}):`, err);
-    }
-  }
-}
 
 function tableExists(probe: Database.Database, tableName: string): boolean {
   return Boolean(
@@ -238,15 +246,25 @@ export function initDatabase(
   if (db) return db;
 
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
-  clearStaleLock(dbPath);
-  backupDatabaseBeforeMigration(dbPath);
-  db = new Database(dbPath);
+  dbClientLease = acquireDatabaseClientLease(dbPath, {
+    recoverUnregisteredLock: hooks?.recoverUnregisteredLock,
+  });
+  try {
+    backupDatabaseBeforeMigration(dbPath);
+    db = new Database(dbPath);
 
-  // Enable foreign key constraints
-  db.pragma("foreign_keys = ON");
+    // Serialize short cross-process write overlaps before reporting a conflict.
+    db.pragma("busy_timeout = 5000");
 
-  // Create tables only (indexes come after migrations)
-  db.exec(SCHEMA_TABLES);
+    // Enable foreign key constraints
+    db.pragma("foreign_keys = ON");
+
+    // Create tables only (indexes come after migrations)
+    db.exec(SCHEMA_TABLES);
+  } catch (error) {
+    resetFailedDatabaseInitialization();
+    throw error;
+  }
 
   // Run all migrations in a single transaction to avoid lock contention.
   // Each table's column list is fetched exactly once and reused.
@@ -260,10 +278,7 @@ export function initDatabase(
     `);
 
     const hasMigration = (name: string): boolean => {
-      return !!db!.get(
-        "SELECT 1 FROM schema_migrations WHERE name = ?",
-        name,
-      );
+      return !!db!.get("SELECT 1 FROM schema_migrations WHERE name = ?", name);
     };
     const markMigration = (name: string): void => {
       db!.run(
@@ -332,7 +347,9 @@ export function initDatabase(
 
     if (!promptCols.includes("visibility")) {
       console.log("Migrating: Adding visibility column to prompts table");
-      db!.run("ALTER TABLE prompts ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private'");
+      db!.run(
+        "ALTER TABLE prompts ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private'",
+      );
     }
 
     if (!promptCols.includes("parent_id")) {
@@ -371,7 +388,9 @@ export function initDatabase(
 
     if (!folderCols.includes("visibility")) {
       console.log("Migrating: Adding visibility column to folders table");
-      db!.run("ALTER TABLE folders ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private'");
+      db!.run(
+        "ALTER TABLE folders ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private'",
+      );
     }
 
     // Migrations: skills table (query column list once)
@@ -395,6 +414,11 @@ export function initDatabase(
       { name: "registry_slug", type: "TEXT" },
       { name: "content_url", type: "TEXT" },
       { name: "installed_content_hash", type: "TEXT" },
+      { name: "installed_directory_fingerprint", type: "TEXT" },
+      { name: "fingerprint_algorithm", type: "TEXT" },
+      { name: "source_last_checked_at", type: "INTEGER" },
+      { name: "source_last_error", type: "TEXT" },
+      { name: "source_binding_state", type: "TEXT" },
       { name: "installed_version", type: "TEXT" },
       { name: "installed_at", type: "INTEGER" },
       { name: "updated_from_store_at", type: "INTEGER" },
@@ -417,6 +441,20 @@ export function initDatabase(
       }
     }
 
+    if (!hasMigration("backfill_skill_legacy_fingerprint_algorithm_v1")) {
+      db!.run(
+        `UPDATE skills
+         SET fingerprint_algorithm = 'legacy-stable-text-v1'
+         WHERE (fingerprint_algorithm IS NULL OR fingerprint_algorithm = '')
+           AND directory_fingerprint IS NOT NULL
+           AND directory_fingerprint != ''`,
+      );
+      markMigration("backfill_skill_legacy_fingerprint_algorithm_v1");
+      console.log(
+        "Migrated: Backfilled legacy fingerprint_algorithm for existing skills",
+      );
+    }
+
     if (!skillCols.includes("owner_user_id")) {
       console.log("Migrating: Adding owner_user_id column to skills table");
       db!.run(
@@ -426,15 +464,16 @@ export function initDatabase(
 
     if (!skillCols.includes("visibility")) {
       console.log("Migrating: Adding visibility column to skills table");
-      db!.run("ALTER TABLE skills ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private'");
+      db!.run(
+        "ALTER TABLE skills ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private'",
+      );
     }
 
     // Backfill: set original_tags = tags for existing skills that don't have original_tags yet
     if (!skillCols.includes("original_tags")) {
-      db!
-        .run(
-          "UPDATE skills SET original_tags = tags WHERE original_tags IS NULL",
-        );
+      db!.run(
+        "UPDATE skills SET original_tags = tags WHERE original_tags IS NULL",
+      );
       console.log("Migrated: Backfilled original_tags for existing skills");
     }
 
@@ -442,10 +481,9 @@ export function initDatabase(
     if (!hasMigration("backfill_local_repo_path_v1")) {
       if (hooks?.resolveSkillRepoPath) {
         try {
-          const skillsWithoutPath = db!
-            .all(
-              "SELECT id, name, source_url FROM skills WHERE local_repo_path IS NULL OR local_repo_path = ''",
-            ) as {
+          const skillsWithoutPath = db!.all(
+            "SELECT id, name, source_url FROM skills WHERE local_repo_path IS NULL OR local_repo_path = ''",
+          ) as {
             id: string;
             name: string;
             source_url: string | null;
@@ -454,8 +492,11 @@ export function initDatabase(
           for (const skill of skillsWithoutPath) {
             const foundPath = hooks.resolveSkillRepoPath(skill);
             if (foundPath) {
-              db!
-                .run("UPDATE skills SET local_repo_path = ? WHERE id = ?", foundPath, skill.id);
+              db!.run(
+                "UPDATE skills SET local_repo_path = ? WHERE id = ?",
+                foundPath,
+                skill.id,
+              );
               console.log(
                 `Migrated: Backfilled local_repo_path for skill "${skill.name}" → ${foundPath}`,
               );
@@ -475,15 +516,14 @@ export function initDatabase(
 
     if (!hasMigration("normalize_skill_version_tracking_v1")) {
       try {
-        const skillsWithVersionStats = db!
-          .all(
-            `SELECT
+        const skillsWithVersionStats = db!.all(
+          `SELECT
                s.id AS id,
                MAX(sv.version) AS max_version
              FROM skills s
              LEFT JOIN skill_versions sv ON sv.skill_id = s.id
              GROUP BY s.id`,
-          ) as Array<{ id: string; max_version: number | null }>;
+        ) as Array<{ id: string; max_version: number | null }>;
 
         for (const skill of skillsWithVersionStats) {
           const hasTrackedVersions =
@@ -544,10 +584,9 @@ export function initDatabase(
       db!.run("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'");
     }
 
-    const userSettingsExists = db!
-      .get(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='user_settings'",
-      );
+    const userSettingsExists = db!.get(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='user_settings'",
+    );
 
     if (!userSettingsExists) {
       console.log("Migrating: Creating user_settings table");
@@ -563,10 +602,9 @@ export function initDatabase(
     }
 
     // ── skill_versions table ────────────────────────────────────────────────
-    const skillVersionsExists = db!
-      .get(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='skill_versions'",
-      );
+    const skillVersionsExists = db!.get(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='skill_versions'",
+    );
 
     if (!skillVersionsExists) {
       console.log("Migrating: Creating skill_versions table");
@@ -585,10 +623,9 @@ export function initDatabase(
       `);
     }
 
-    const rulesExists = db!
-      .get(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='rules'",
-      );
+    const rulesExists = db!.get(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='rules'",
+    );
 
     if (!rulesExists) {
       console.log("Migrating: Creating rules table");
@@ -614,10 +651,9 @@ export function initDatabase(
       `);
     }
 
-    const ruleVersionsExists = db!
-      .get(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='rule_versions'",
-      );
+    const ruleVersionsExists = db!.get(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='rule_versions'",
+    );
 
     if (!ruleVersionsExists) {
       console.log("Migrating: Creating rule_versions table");
@@ -650,17 +686,23 @@ export function initDatabase(
     ).map((c) => c.name);
 
     if (!promptVersionCols.includes("system_prompt_en")) {
-      console.log("Migrating: Adding system_prompt_en column to prompt_versions table");
+      console.log(
+        "Migrating: Adding system_prompt_en column to prompt_versions table",
+      );
       db!.run("ALTER TABLE prompt_versions ADD COLUMN system_prompt_en TEXT");
     }
 
     if (!promptVersionCols.includes("user_prompt_en")) {
-      console.log("Migrating: Adding user_prompt_en column to prompt_versions table");
+      console.log(
+        "Migrating: Adding user_prompt_en column to prompt_versions table",
+      );
       db!.run("ALTER TABLE prompt_versions ADD COLUMN user_prompt_en TEXT");
     }
 
     if (!promptVersionCols.includes("ai_response")) {
-      console.log("Migrating: Adding ai_response column to prompt_versions table");
+      console.log(
+        "Migrating: Adding ai_response column to prompt_versions table",
+      );
       db!.run("ALTER TABLE prompt_versions ADD COLUMN ai_response TEXT");
     }
 
@@ -681,13 +723,13 @@ export function initDatabase(
 
   try {
     runMigrations();
+    // Now that all columns exist, create indexes + FTS
+    db.exec(SCHEMA_INDEXES);
   } catch (error) {
     console.error("Database migration failed:", error);
+    resetFailedDatabaseInitialization();
     throw error;
   }
-
-  // Now that all columns exist, create indexes + FTS
-  db.exec(SCHEMA_INDEXES);
 
   console.log(`Database initialized at: ${dbPath}`);
   return db;
@@ -707,9 +749,13 @@ export function getDatabase(): Database.Database {
  * Close database connection
  */
 export function closeDatabase(): void {
-  if (db) {
-    db.close();
-    db = null;
+  const databaseToClose = db;
+  db = null;
+  try {
+    databaseToClose?.close();
+  } finally {
+    dbClientLease?.release();
+    dbClientLease = null;
   }
 }
 
