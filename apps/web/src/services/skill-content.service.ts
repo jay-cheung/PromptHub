@@ -1,5 +1,6 @@
 import dns from 'node:dns/promises';
 
+import { parseSkillMd } from '@prompthub/core/skills/skill-frontmatter';
 import type {
   SafetyScanAIConfig,
   SkillSafetyFinding,
@@ -7,6 +8,12 @@ import type {
   SkillSafetyReport,
   SkillSafetyScanInput,
 } from '@prompthub/shared';
+import {
+  buildChatEndpointFromBase,
+  buildHeadersForProtocol,
+  resolveAIProtocol,
+  resolveProtocolBase,
+} from '@prompthub/shared/utils/ai-protocol';
 
 const AI_REQUEST_TIMEOUT_MS = 60_000;
 
@@ -76,118 +83,6 @@ export interface ParsedRemoteSkill {
   tags?: string[];
   body: string;
   raw: string;
-}
-
-function resolveAIProtocol(
-  config: Pick<SafetyScanAIConfig, 'apiProtocol' | 'provider' | 'apiUrl'>,
-): SafetyScanAIConfig['apiProtocol'] {
-  if (
-    config.apiProtocol === 'openai' ||
-    config.apiProtocol === 'gemini' ||
-    config.apiProtocol === 'anthropic'
-  ) {
-    return config.apiProtocol;
-  }
-
-  const provider = config.provider?.toLowerCase() || '';
-  const apiUrl = config.apiUrl?.toLowerCase() || '';
-
-  if (provider === 'anthropic' || apiUrl.includes('api.anthropic.com')) {
-    return 'anthropic';
-  }
-
-  if (
-    provider === 'google' ||
-    provider === 'gemini' ||
-    apiUrl.includes('generativelanguage.googleapis.com')
-  ) {
-    return 'gemini';
-  }
-
-  return 'openai';
-}
-
-function getBaseUrl(apiUrl: string): string {
-  if (!apiUrl) return '';
-  let url = apiUrl.trim();
-  if (url.endsWith('#')) return url.slice(0, -1);
-  if (url.endsWith('/')) url = url.slice(0, -1);
-  for (const suffix of [
-    '/chat/completions',
-    '/completions',
-    '/models',
-    '/embeddings',
-    '/images/generations',
-    '/messages',
-  ]) {
-    if (url.endsWith(suffix)) {
-      return url.slice(0, -suffix.length);
-    }
-  }
-  return url;
-}
-
-function buildChatEndpoint(
-  apiUrl: string,
-  protocol: SafetyScanAIConfig['apiProtocol'],
-): string {
-  const trimmed = apiUrl.trim();
-  const explicit = trimmed.endsWith('#');
-  const baseUrl = getBaseUrl(explicit ? trimmed.slice(0, -1) : trimmed).replace(
-    /\/$/,
-    '',
-  );
-
-  if (explicit) {
-    if (protocol === 'anthropic') {
-      return baseUrl.endsWith('/messages') ? baseUrl : `${baseUrl}/messages`;
-    }
-    return baseUrl.endsWith('/chat/completions')
-      ? baseUrl
-      : `${baseUrl}/chat/completions`;
-  }
-
-  if (protocol === 'gemini') {
-    if (baseUrl.endsWith('/openai')) {
-      return `${baseUrl}/chat/completions`;
-    }
-    if (baseUrl.match(/\/v\d+(?:beta)?$/)) {
-      return `${baseUrl}/openai/chat/completions`;
-    }
-    return `${baseUrl}/v1beta/openai/chat/completions`;
-  }
-
-  if (protocol === 'anthropic') {
-    if (baseUrl.match(/\/v\d+$/)) {
-      return `${baseUrl}/messages`;
-    }
-    return `${baseUrl}/v1/messages`;
-  }
-
-  if (baseUrl.match(/\/v\d+$/)) {
-    return `${baseUrl}/chat/completions`;
-  }
-
-  return `${baseUrl}/v1/chat/completions`;
-}
-
-function buildHeaders(
-  config: SafetyScanAIConfig,
-  protocol: SafetyScanAIConfig['apiProtocol'],
-): Record<string, string> {
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    Accept: 'application/json',
-  };
-
-  if (protocol === 'anthropic') {
-    headers['x-api-key'] = config.apiKey;
-    headers['anthropic-version'] = '2023-06-01';
-  } else {
-    headers.Authorization = `Bearer ${config.apiKey}`;
-  }
-
-  return headers;
 }
 
 function isLoopbackOrPrivateIpv4(address: string): boolean {
@@ -314,8 +209,12 @@ async function chatCompletion(
   }
 
   const protocol = resolveAIProtocol(config);
-  const endpoint = buildChatEndpoint(config.apiUrl, protocol);
-  const headers = buildHeaders(config, protocol);
+  const endpoint = buildChatEndpointFromBase(
+    resolveProtocolBase(config.apiUrl, protocol),
+  );
+  const headers = buildHeadersForProtocol(protocol, config.apiKey, {
+    accept: 'application/json',
+  });
   const isGemini = protocol === 'gemini';
   const isAnthropic = protocol === 'anthropic';
   const model = isGemini ? config.model.replace(/^models\//, '') : config.model;
@@ -598,68 +497,22 @@ export async function scanSkillContentWithAI(
 }
 
 export function parseRemoteSkill(content: string): ParsedRemoteSkill {
-  const frontmatterMatch = content.match(/^---\s*\r?\n([\s\S]*?)\r?\n---\s*(?:\r?\n)?/);
-  if (!frontmatterMatch) {
+  const parsed = parseSkillMd(content);
+  if (!parsed) {
     return {
       body: content.trim(),
       raw: content,
     };
   }
 
-  const frontmatterLines = frontmatterMatch[1].split(/\r?\n/);
-  const parsed: ParsedRemoteSkill = {
-    body: content.slice(frontmatterMatch[0].length).trim(),
+  const frontmatter = parsed.frontmatter;
+  return {
+    ...(frontmatter.name ? { name: frontmatter.name } : {}),
+    ...(frontmatter.description !== undefined ? { description: frontmatter.description } : {}),
+    ...(frontmatter.version !== undefined ? { version: frontmatter.version } : {}),
+    ...(frontmatter.author !== undefined ? { author: frontmatter.author } : {}),
+    ...(frontmatter.tags !== undefined ? { tags: frontmatter.tags } : {}),
+    body: parsed.body,
     raw: content,
   };
-
-  for (const line of frontmatterLines) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith('#')) {
-      continue;
-    }
-
-    const colonIndex = trimmed.indexOf(':');
-    if (colonIndex === -1) {
-      continue;
-    }
-
-    const key = trimmed.slice(0, colonIndex).trim();
-    let value = trimmed.slice(colonIndex + 1).trim();
-
-    if (
-      (value.startsWith('"') && value.endsWith('"')) ||
-      (value.startsWith("'") && value.endsWith("'"))
-    ) {
-      value = value.slice(1, -1);
-    }
-
-    if (value.startsWith('[') && value.endsWith(']')) {
-      const items = value
-        .slice(1, -1)
-        .split(',')
-        .map((item) => item.trim().replace(/^['"]|['"]$/g, ''))
-        .filter(Boolean);
-      if (key === 'tags') {
-        parsed.tags = items;
-      }
-      continue;
-    }
-
-    if (key === 'name') {
-      parsed.name = value;
-    } else if (key === 'description') {
-      parsed.description = value;
-    } else if (key === 'version') {
-      parsed.version = value;
-    } else if (key === 'author') {
-      parsed.author = value;
-    } else if (key === 'tags' && !parsed.tags) {
-      parsed.tags = value
-        .split(',')
-        .map((item) => item.trim())
-        .filter(Boolean);
-    }
-  }
-
-  return parsed;
 }

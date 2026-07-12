@@ -7,8 +7,8 @@ file manually. Run the generator after adding, moving, or archiving a change.
 
 | State | Count |
 | --- | ---: |
-| Active | 26 |
-| Archived | 149 |
+| Active | 27 |
+| Archived | 160 |
 | Legacy | 1 |
 
 ## Active
@@ -16,6 +16,7 @@ file manually. Run the generator after adding, moving, or archiving a change.
 | Change | Recorded status | Path |
 | --- | --- | --- |
 | `app-shell-left-rail` | in progress | `spec/changes/active/app-shell-left-rail/` |
+| `cli-feature-completeness` | active | `spec/changes/active/cli-feature-completeness/` |
 | `cli-install-manual-fallback` | active | `spec/changes/active/cli-install-manual-fallback/` |
 | `desktop-frontend-animation-system` | active | `spec/changes/active/desktop-frontend-animation-system/` |
 | `desktop-frontend-perf-tuneup` | active | `spec/changes/active/desktop-frontend-perf-tuneup/` |
@@ -24,6 +25,7 @@ file manually. Run the generator after adding, moving, or archiving a change.
 | `desktop-prompt-context-move` | active | `spec/changes/active/desktop-prompt-context-move/` |
 | `desktop-renderer-ui-test-coverage` | active | `spec/changes/active/desktop-renderer-ui-test-coverage/` |
 | `desktop-update-dialog-polish` | active | `spec/changes/active/desktop-update-dialog-polish/` |
+| `grok-build-platform-support` | active | `spec/changes/active/grok-build-platform-support/` |
 | `homepage-changelog-route-retirement` | active | `spec/changes/active/homepage-changelog-route-retirement/` |
 | `macos-developer-id-signing` | active | `spec/changes/active/macos-developer-id-signing/` |
 | `mcp-env-sync-reapply` | implemented | `spec/changes/active/mcp-env-sync-reapply/` |
@@ -35,7 +37,6 @@ file manually. Run the generator after adding, moving, or archiving a change.
 | `prompt-output-format-contribution` | active | `spec/changes/active/prompt-output-format-contribution/` |
 | `r2-direct-downloads` | active | `spec/changes/active/r2-direct-downloads/` |
 | `readme-screenshots-v0-5-6` | active | `spec/changes/active/readme-screenshots-v0-5-6/` |
-| `release-verification-harness` | active | `spec/changes/active/release-verification-harness/` |
 | `rules-managed-copies` | in progress | `spec/changes/active/rules-managed-copies/` |
 | `skill-source-update-reconciliation` | completed | `spec/changes/active/skill-source-update-reconciliation/` |
 | `skill-uninstall-lifecycle` | active | `spec/changes/active/skill-uninstall-lifecycle/` |
@@ -191,10 +192,21 @@ file manually. Run the generator after adding, moving, or archiving a change.
 | `2026-07-06-web-skill-workspace-atomic-export` | archived | `spec/changes/archive/2026/07/2026-07-06-web-skill-workspace-atomic-export/` |
 | `2026-07-06-web-sync-data-size-boundary` | archived | `spec/changes/archive/2026/07/2026-07-06-web-sync-data-size-boundary/` |
 | `2026-07-07-desktop-platform-brand-icons` | archived | `spec/changes/archive/2026/07/2026-07-07-desktop-platform-brand-icons/` |
+| `2026-07-10-cli-desktop-database-concurrency` | archived | `spec/changes/archive/2026/07/2026-07-10-cli-desktop-database-concurrency/` |
+| `2026-07-10-desktop-legacy-lock-recovery` | archived | `spec/changes/archive/2026/07/2026-07-10-desktop-legacy-lock-recovery/` |
 | `2026-07-10-spec-governance-single-source-cleanup` | archived | `spec/changes/archive/2026/07/2026-07-10-spec-governance-single-source-cleanup/` |
 | `2026-07-10-spec-init-submission-gate` | archived | `spec/changes/archive/2026/07/2026-07-10-spec-init-submission-gate/` |
 | `2026-07-10-spec-init-upstream-alignment` | archived | `spec/changes/archive/2026/07/2026-07-10-spec-init-upstream-alignment/` |
 | `2026-07-10-spec-structure-rename` | archived | `spec/changes/archive/2026/07/2026-07-10-spec-structure-rename/` |
+| `2026-07-11-desktop-release-portability-repair` | archived | `spec/changes/archive/2026/07/2026-07-11-desktop-release-portability-repair/` |
+| `2026-07-11-project-module-boundary-hardening` | archived | `spec/changes/archive/2026/07/2026-07-11-project-module-boundary-hardening/` |
+| `2026-07-11-readme-desktop-module-screenshots-v0-5-9` | archived | `spec/changes/archive/2026/07/2026-07-11-readme-desktop-module-screenshots-v0-5-9/` |
+| `2026-07-11-release-verification-harness` | archived | `spec/changes/archive/2026/07/2026-07-11-release-verification-harness/` |
+| `2026-07-11-skill-frontmatter-yaml-parser` | archived | `spec/changes/archive/2026/07/2026-07-11-skill-frontmatter-yaml-parser/` |
+| `2026-07-11-skill-module-boundary-refactor` | archived | `spec/changes/archive/2026/07/2026-07-11-skill-module-boundary-refactor/` |
+| `2026-07-11-skill-source-update-trust-review` | archived | `spec/changes/archive/2026/07/2026-07-11-skill-source-update-trust-review/` |
+| `2026-07-11-web-release-version-alignment` | archived | `spec/changes/archive/2026/07/2026-07-11-web-release-version-alignment/` |
+| `2026-07-11-web-workspace-capability-alignment` | archived | `spec/changes/archive/2026/07/2026-07-11-web-workspace-capability-alignment/` |
 
 ## Legacy
 
